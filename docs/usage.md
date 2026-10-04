@@ -133,13 +133,15 @@ files resolve project > user > bundled; a set of agents ships bundled
 name: reviewer
 description: Reviews diffs for correctness and style
 mode: all                      # primary | subagent | all (default: subagent)
-model: corp-codex/gpt-5.6-sol  # overrides role; may carry a provider prefix
+model: mycompany/model-x       # overrides role; may carry a provider prefix
 role: smol                     # config role used when model: is absent
+fallback-models: mycompany/model-x-lite, mycompany/model-x-mini
 tools: read, grep, find        # comma-separated; empty = all tools
 temperature: 0.2
 reasoningEffort: high          # none | minimal | low | medium | high | max
 steps: 150                     # tool-call iterations cap; 0 = unlimited
-timeout: 600000                # ms; accepts 1h/30m/90s/500ms suffixes
+timeout: 600000                # ms; accepts 1h/30m/90s suffixes (>=1s)
+streamIdleTimeout: 90s         # stream-silence abort; 0 disables it
 worktree: true                 # run in an isolated git worktree
 lsp: full                      # off | min | full
 permission:                    # agent-scoped rules, layered over the global ones
@@ -149,6 +151,26 @@ permission:                    # agent-scoped rules, layered over the global one
 ---
 System prompt body in markdown.
 ```
+
+Frontmatter keys and their defaults:
+
+| Key | Values | Default |
+|---|---|---|
+| `name` | agent identifier | filename stem (`<name>.md` → `<name>`) |
+| `description` | one-line description shown to the calling model | — |
+| `mode` | `primary`, `subagent` or `all` | `subagent` |
+| `model` | model name, optionally `provider/model`; overrides `role` | — |
+| `role` | config role name (`smol`, `plan`, `slow`, …) used when `model` is absent | — |
+| `fallback-models` | comma-separated models, same format as `model`, tried in order when the primary is unavailable (exhausted quota, auth errors, repeated 5xx); at most the first 3 are used | the role's `fallbackModels` (falling back to the `default` role's) |
+| `tools` | comma-separated tool names | all tools |
+| `temperature` | float | inherited |
+| `reasoningEffort` | `none`, `minimal` (same as `none`), `low`, `medium`, `high`, `max`; unknown values warn and inherit | inherited |
+| `steps` | cap on the child's tool-call iterations; `0` = unlimited | unlimited |
+| `timeout` | absolute agent timeout, ms or with `1h`/`30m`/`90s` suffixes; values under 1 second are ignored with a warning | 20 minutes |
+| `streamIdleTimeout` | stream-silence timeout, ms or the same suffixes; `0` disables the idle abort; values under 1 second are ignored with a warning | inherited from the child's config (`90s` when unset there) |
+| `worktree` | `true` or `false` | `false` |
+| `lsp` | `off`, `min` or `full` | the child's default (`min`) |
+| `permission` | block of rules — per-tool rules plus a nested `bash:` block of command patterns — layered over the global rules; a scalar value is ignored with a warning | global rules only |
 
 `mode:` decides where an agent may run: `subagent` (default — spawned as a
 subagent only), `primary` (reserved for the main session), `all` (both).
