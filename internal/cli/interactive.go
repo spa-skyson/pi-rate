@@ -773,7 +773,7 @@ func runDeferredInitPhase2(ctx context.Context, cfg config.Config, cwd string, s
 	go func() {
 		defer wg.Done()
 		send("skills", false)
-		dirs := extension.DefaultSkillDirs()
+		dirs := extension.DefaultSkillDirsIn(cwd, cfg)
 		sk, _ := extension.LoadSkills(dirs...)
 		ps.mu.Lock()
 		ps.skills = sk

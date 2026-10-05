@@ -149,6 +149,24 @@ Project skills override user skills of the same name. User skills override bundl
 
 **Pi-go also reads `.claude/skills/` and `.cursor/skills/`** when walking up from the working directory — existing Claude Code skills work in pi-go without copying.
 
+#### Controlling which directories are searched
+
+Two `config.json` knobs (global `~/.pirate/config.json` or project `.pirate/config.json`) and their env overrides change discovery:
+
+| Knob | Env override | Effect |
+|---|---|---|
+| `"skillsDirs": ["/abs/path/skills"]` | `PI_SKILLS_DIRS` (colon-separated, like PATH) | Replaces the user- and project-level directories with an explicit list. Bundled skills and installed plugins stay. |
+| `"disableLegacySkillDirs": true` | `PI_DISABLE_LEGACY_SKILLS=1` | Drops `.claude/skills` and `.cursor/skills`. `.pirate/skills` and `~/.pirate/skills` are unaffected. |
+
+```json
+{
+  "skillsDirs": ["/home/you/work/skills"],
+  "disableLegacySkillDirs": true
+}
+```
+
+Env vars win over config. Entries may be absolute paths or relative to the working directory; relative entries are used as-is (no walking up, no `~` expansion — expand it in the shell when exporting `PI_SKILLS_DIRS`).
+
 ### Claude Code Skill Format Comparison
 
 Claude Code skills use the same subdirectory + `SKILL.md` pattern. The frontmatter fields differ slightly:
@@ -473,7 +491,7 @@ Create per the example above for security-focused review passes.
 |---|---|---|
 | Project rules / architecture | `AGENTS.md` | `.pirate/AGENTS.md` |
 | Teach agent a workflow | Skill `<name>/SKILL.md` | `.pirate/skills/<name>/SKILL.md` |
-| Reuse Claude Code skills | Nothing — auto-discovered | `.claude/skills/` (already read) |
+| Reuse Claude Code skills | Nothing — auto-discovered | `.claude/skills/` (already read; disable with `disableLegacySkillDirs`) |
 | Run shell commands on tool events | `hooks` in config | `.pirate/config.json` |
 | Define a new subagent type | `<name>.md` | `.pirate/agents/<name>.md` |
 | Add an external tool server | `mcp.servers` in config | `.pirate/mcp.json` |

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/extension"
 )
 
@@ -91,7 +92,7 @@ func TestSystemPromptSizeReport(t *testing.T) {
 	// Machine-realistic variant: the full production skill list (bundled +
 	// user + project dirs resolved from the repo root). Log-only because the
 	// exact set depends on the machine's ~/.pirate and ~/.claude contents.
-	if all, err := extension.LoadSkills(extension.DefaultSkillDirsIn(root)...); err == nil && len(all) > len(skills) {
+	if all, err := extension.LoadSkills(extension.DefaultSkillDirsIn(root, config.Config{})...); err == nil && len(all) > len(skills) {
 		name, chars, lines, tokens := measure("Skills ALL dirs (before)", fullMenu(all))
 		t.Logf("%-28s %7d chars %5d lines ~%5d tokens (%d skills)", name, chars, lines, tokens, len(all))
 		name, chars, lines, tokens = measure("Skills ALL dirs (after)", appendSkillsMenu(all))

@@ -3,7 +3,10 @@ package extension
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/spa-skyson/pi-rate/internal/config"
 )
 
 func TestDefaultSkillDirs(t *testing.T) {
@@ -26,7 +29,7 @@ func TestDefaultSkillDirsIn(t *testing.T) {
 		t.Fatalf("create .claude skills dir: %v", err)
 	}
 
-	dirs := DefaultSkillDirsIn(root)
+	dirs := DefaultSkillDirsIn(root, config.Config{})
 	if len(dirs) == 0 {
 		t.Error("DefaultSkillDirsIn returned empty")
 	}
@@ -53,7 +56,7 @@ func TestDefaultSkillDirsIn(t *testing.T) {
 
 func TestDefaultSkillDirsInUserHome(t *testing.T) {
 	// Test with a path that has no project skills.
-	dirs := DefaultSkillDirsIn("/tmp")
+	dirs := DefaultSkillDirsIn("/tmp", config.Config{})
 	t.Logf("DefaultSkillDirsIn(/tmp): %v", dirs)
 
 	// Should still include user-level directory.
@@ -84,6 +87,107 @@ func TestDefaultSkillDirsNoDuplicates(t *testing.T) {
 			t.Errorf("duplicate directory: %s", d)
 		}
 		seen[d] = true
+	}
+}
+
+// A configured skillsDirs replaces the default user- and project-level
+// discovery: only the configured directories are searched, plugins stay first
+// (issue #59).
+func TestDefaultSkillDirsInWithSkillsDirsOverride(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{".pirate/skills", ".claude/skills", ".cursor/skills", "custom/skills"} {
+		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	custom := filepath.Join(root, "custom", "skills")
+	dirs := DefaultSkillDirsIn(root, config.Config{SkillsDirs: []string{custom}})
+
+	if !slices.Contains(dirs, custom) {
+		t.Errorf("configured dir %q missing from result: %v", custom, dirs)
+	}
+	// The whole default discovery is replaced, not extended.
+	for _, unwanted := range []string{
+		filepath.Join(root, ".pirate", "skills"),
+		filepath.Join(root, ".claude", "skills"),
+		filepath.Join(root, ".cursor", "skills"),
+	} {
+		if slices.Contains(dirs, unwanted) {
+			t.Errorf("default dir %q still present with skillsDirs override: %v", unwanted, dirs)
+		}
+	}
+}
+
+// disableLegacySkillDirs drops .claude/skills and .cursor/skills but keeps
+// .pirate/skills (issue #59).
+func TestDefaultSkillDirsInWithDisableLegacy(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{".pirate/skills", ".claude/skills", ".cursor/skills"} {
+		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dirs := DefaultSkillDirsIn(root, config.Config{DisableLegacySkillDirs: true})
+
+	piSkills := filepath.Join(root, ".pirate", "skills")
+	if !slices.Contains(dirs, piSkills) {
+		t.Errorf(".pirate/skills %q missing with disableLegacySkillDirs: %v", piSkills, dirs)
+	}
+	for _, legacy := range []string{
+		filepath.Join(root, ".claude", "skills"),
+		filepath.Join(root, ".cursor", "skills"),
+	} {
+		if slices.Contains(dirs, legacy) {
+			t.Errorf("legacy dir %q still present with disableLegacySkillDirs: %v", legacy, dirs)
+		}
+	}
+}
+
+// PI_SKILLS_DIRS and PI_DISABLE_LEGACY_SKILLS override the config fields per
+// process (issue #59).
+func TestDefaultSkillDirsInEnvOverride(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{".pirate/skills", ".claude/skills", ".cursor/skills", "custom/skills"} {
+		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	custom := filepath.Join(root, "custom", "skills")
+	legacy := []string{
+		filepath.Join(root, ".claude", "skills"),
+		filepath.Join(root, ".cursor", "skills"),
+	}
+	piSkills := filepath.Join(root, ".pirate", "skills")
+
+	// Env wins over the config fields.
+	t.Setenv(config.EnvSkillsDirs, custom)
+	t.Setenv(config.EnvDisableLegacySkillDirs, "1")
+
+	// The env skillsDirs suppresses the default discovery entirely, so the
+	// legacy flag is moot there; both are asserted together.
+	dirs := DefaultSkillDirsIn(root, config.Config{})
+	if !slices.Contains(dirs, custom) {
+		t.Errorf("PI_SKILLS_DIRS dir %q missing: %v", custom, dirs)
+	}
+	for _, unwanted := range append(slices.Clone(legacy), piSkills) {
+		if slices.Contains(dirs, unwanted) {
+			t.Errorf("default dir %q still present with PI_SKILLS_DIRS: %v", unwanted, dirs)
+		}
+	}
+
+	// The legacy switch on its own keeps .pirate/skills.
+	t.Setenv(config.EnvSkillsDirs, "")
+	t.Setenv(config.EnvDisableLegacySkillDirs, "true")
+	dirs = DefaultSkillDirsIn(root, config.Config{})
+	if !slices.Contains(dirs, piSkills) {
+		t.Errorf(".pirate/skills %q missing with PI_DISABLE_LEGACY_SKILLS: %v", piSkills, dirs)
+	}
+	for _, l := range legacy {
+		if slices.Contains(dirs, l) {
+			t.Errorf("legacy dir %q still present with PI_DISABLE_LEGACY_SKILLS: %v", l, dirs)
+		}
 	}
 }
 
