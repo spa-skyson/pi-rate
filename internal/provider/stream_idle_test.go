@@ -288,7 +288,10 @@ func (boundaryModel) Name() string { return "boundary" }
 func (boundaryModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		start := time.Now()
-		for _, at := range []time.Duration{3 * time.Millisecond, 6 * time.Millisecond, 60 * time.Millisecond} {
+		// Scaled ×5 from 3/6/60ms (issue #61): the proportions matter, the
+		// absolute values do not, and the ×5 margins absorb a loaded CI
+		// runner's scheduler jitter that flaked the 6ms-chunk schedule.
+		for _, at := range []time.Duration{15 * time.Millisecond, 30 * time.Millisecond, 300 * time.Millisecond} {
 			select {
 			case <-ctx.Done():
 				yield(nil, ctx.Err())
@@ -312,10 +315,13 @@ func (boundaryModel) GenerateContent(ctx context.Context, req *model.LLMRequest,
 // with the second chunk already buffered, so both select cases are ready
 // when the watch resumes. 25 rounds make an unfixed watch fail with
 // probability 1-2^-25; a fixed watch delivers all three chunks every time.
+// Timings are scaled ×5 from 30/45ms (issue #61): the chunk-vs-timer
+// proportions are unchanged, but a slow CI runner gets 5× the headroom to
+// buffer the second chunk before the parked consumer resumes.
 func TestStreamIdleRacingChunkBeatsIdleAbort(t *testing.T) {
 	const (
-		idle   = 30 * time.Millisecond
-		hold   = 45 * time.Millisecond // past the fire, chunk 2 long buffered
+		idle   = 150 * time.Millisecond
+		hold   = 225 * time.Millisecond // past the fire, chunk 2 long buffered
 		rounds = 25
 	)
 
