@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -155,6 +158,55 @@ func TestPalaceWiring_APIEmbedderReachesEverySite(t *testing.T) {
 			t.Errorf("mining embedder = %q, want api/bge-m3", status.Embedder)
 		}
 	})
+
+	t.Run("runMemoryInit opens the api palace without ollama warnings", func(t *testing.T) {
+		// init runs before any model is mined, so there is nothing to embed
+		// yet; the observable is the embedder the palace was built with. A
+		// regressed runMemoryInit builds from defaults (UseOllama=true), whose
+		// probe fails against the test's endpoint and logs the fallback; the
+		// configured api backend constructs without any network at all.
+		warnings := captureEmbedderWarnings(t)
+		project := t.TempDir()
+		captureStdout(t, func() {
+			if err := runMemoryInit(project, ""); err != nil {
+				t.Fatalf("runMemoryInit: %v", err)
+			}
+		})
+		if msgs := warnings(); len(msgs) != 0 {
+			t.Errorf("embedder fallbacks logged: %q — init ignored the configured embeddings_url", msgs)
+		}
+	})
+}
+
+// embedderWarnRecorder captures messages logged through the default slog
+// handler. openEmbedder logs its fallbacks synchronously from the calling
+// goroutine, so no locking is needed under -race.
+type embedderWarnRecorder struct {
+	msgs []string
+}
+
+func (w *embedderWarnRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (w *embedderWarnRecorder) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, "embedder") {
+		w.msgs = append(w.msgs, r.Message)
+	}
+	return nil
+}
+
+func (w *embedderWarnRecorder) WithAttrs([]slog.Attr) slog.Handler { return w }
+
+func (w *embedderWarnRecorder) WithGroup(string) slog.Handler { return w }
+
+// captureEmbedderWarnings installs the recorder for the test and returns a
+// reader of the embedder fallback messages logged so far.
+func captureEmbedderWarnings(t *testing.T) func() []string {
+	t.Helper()
+	w := &embedderWarnRecorder{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(w))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []string { return w.msgs }
 }
 
 // TestEnsureMineModel_SkipsDownloadForNetworkBackends pins the gate: with an
