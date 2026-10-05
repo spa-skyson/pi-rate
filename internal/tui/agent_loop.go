@@ -13,15 +13,18 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	adkmodel "google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 
+	"github.com/google/uuid"
 	"github.com/spa-skyson/pi-rate/internal/agent"
 	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/extension"
 	"github.com/spa-skyson/pi-rate/internal/logger"
 	"github.com/spa-skyson/pi-rate/internal/otel"
 	"github.com/spa-skyson/pi-rate/internal/retry"
+	pisession "github.com/spa-skyson/pi-rate/internal/session"
 	"github.com/spa-skyson/pi-rate/internal/tools"
 )
 
@@ -947,6 +950,7 @@ func (m *model) startAgentLoop(prompt string) tea.Cmd {
 type agentRunConfig struct {
 	agent     *agent.Agent
 	sessionID string
+	sessions  *pisession.FileService
 	logger    *logger.Logger
 }
 
@@ -954,6 +958,7 @@ func (m *model) agentRun() agentRunConfig {
 	return agentRunConfig{
 		agent:     m.cfg.Agent,
 		sessionID: m.cfg.SessionID,
+		sessions:  m.cfg.SessionService,
 		logger:    m.cfg.Logger,
 	}
 }
@@ -1193,7 +1198,14 @@ func (m *model) runAgentLoop(ctx context.Context, prompt string, ch chan agentMs
 	// Every exit below reports through fail, so the "tell the user, then stop"
 	// pair can't drift apart. Logger methods are nil-safe (logger.Log guards a
 	// nil receiver), so no call site needs to check.
+	//
+	// fail is where a turn dies for good — provider failure, mid-turn guard,
+	// user cancel (Esc cancels the context, which surfaces here as
+	// ctx.Err()). Any function call persisted without its response is
+	// answered synthetically first, or ADK would drop it from every later
+	// context build (issue #60).
 	fail := func(err error) {
+		synthesizeStoppedResponses(run.sessions, run.sessionID, err.Error(), log)
 		log.Error(err.Error())
 		ch <- agentDoneMsg{err: err}
 	}
@@ -1236,6 +1248,11 @@ func (m *model) runAgentLoop(ctx context.Context, prompt string, ch chan agentMs
 				text: fmt.Sprintf("Loop detected (%s) — telling the model and resuming (attempt %d of %d).",
 					stuck.Detail(), stuckRecoveries, maxStuckRecoveries),
 			}
+			// The aborted attempt's last call was persisted, but stopping the
+			// stream here also stops the tool that would have answered it —
+			// the answer must be synthesized before the recovery prompt
+			// rebuilds the context, or ADK drops the call (issue #60).
+			synthesizeStoppedResponses(run.sessions, run.sessionID, "loop detected: "+stuck.Detail(), log)
 			prompt = recoverStuckPrompt(stuck.Detail())
 			continue
 		}
@@ -1244,6 +1261,10 @@ func (m *model) runAgentLoop(ctx context.Context, prompt string, ch chan agentMs
 			if turnUsage != nil {
 				ch <- agentUsageMsg{usage: turnUsage, elapsed: time.Since(turnStart)}
 			}
+			// A clean turn normally pairs every call with a response; a
+			// max-tokens cut between the two is the exception. The sweep
+			// finds nothing on the normal path.
+			synthesizeStoppedResponses(run.sessions, run.sessionID, "turn ended before the tool response arrived", log)
 			return
 		}
 
@@ -1270,6 +1291,96 @@ func (m *model) runAgentLoop(ctx context.Context, prompt string, ch chan agentMs
 		}
 		fail(err)
 		return
+	}
+}
+
+// synthesizeStoppedResponses answers every function call in the session that
+// no function response follows with a synthetic error response naming the
+// stop reason. A turn that ends between persisting a call and receiving its
+// response — the loop auto-stop (issue #60), a cancel, a terminal failure —
+// otherwise leaves the call dangling forever: ADK drops it from every later
+// context build with a "dropping function calls with no matching function
+// response" warning, and the model never learns what happened to the tool.
+//
+// The scan is one reverse pass over the persisted events: a response marks
+// its id answered, a call with no later answer is an orphan, so the cost is
+// linear in history length and old orphans from earlier turns are healed
+// too. Appended events copy the shape of a real tool response (author,
+// invocation and node info come from the call's event), so ADK matches them
+// by id like any other pair. Best-effort: a failed append is logged and the
+// orphan is left for the next sweep.
+func synthesizeStoppedResponses(svc *pisession.FileService, sessionID, reason string, log *logger.Logger) {
+	if svc == nil || sessionID == "" {
+		return
+	}
+	resp, err := svc.Get(context.Background(), &session.GetRequest{
+		AppName:   agent.AppName,
+		UserID:    agent.DefaultUserID,
+		SessionID: sessionID,
+	})
+	if err != nil || resp == nil || resp.Session == nil {
+		log.Errorf("synthetic responses: reading session %s: %v", sessionID, err)
+		return
+	}
+	type orphan struct {
+		call *genai.FunctionCall
+		from *session.Event
+	}
+	events := resp.Session.Events()
+	answered := make(map[string]struct{}, events.Len())
+	var orphans []orphan
+	for i := events.Len() - 1; i >= 0; i-- {
+		ev := events.At(i)
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part == nil {
+				continue
+			}
+			if fr := part.FunctionResponse; fr != nil && fr.ID != "" {
+				answered[fr.ID] = struct{}{}
+			}
+			if fc := part.FunctionCall; fc != nil && fc.ID != "" {
+				if _, ok := answered[fc.ID]; !ok {
+					orphans = append(orphans, orphan{call: fc, from: ev})
+				}
+			}
+		}
+	}
+	for _, o := range orphans {
+		if err := svc.AppendEvent(context.Background(), resp.Session, stoppedResponseEvent(o.call, o.from, reason)); err != nil {
+			log.Errorf("synthetic response for %s: %v", o.call.ID, err)
+			continue
+		}
+		log.Info(fmt.Sprintf("synthesized function response for %s (%s): turn was stopped: %s", o.call.ID, o.call.Name, reason))
+	}
+}
+
+// stoppedResponseEvent builds the synthetic function-response event for one
+// orphaned call: the same shape a real tool response event carries (role
+// "user", the call's author, invocation and node info), with the error key
+// ADK tools use to report failure. ADK pairs it with the call by id.
+func stoppedResponseEvent(call *genai.FunctionCall, from *session.Event, reason string) *session.Event {
+	return &session.Event{
+		ID: uuid.NewString(),
+		LLMResponse: adkmodel.LLMResponse{
+			Content: &genai.Content{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       call.ID,
+						Name:     call.Name,
+						Response: map[string]any{"error": "turn was stopped: " + reason},
+					},
+				}},
+			},
+		},
+		InvocationID: from.InvocationID,
+		Author:       from.Author,
+		Timestamp:    time.Now(),
+		Actions:      session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}},
+		NodeInfo:     from.NodeInfo,
 	}
 }
 
