@@ -303,6 +303,36 @@ func palacePaths(cfg config.Config) (dbPath, modelPath string) {
 	return dbPath, modelPath
 }
 
+// resolvePalaceConfig maps the config file's palace section onto a
+// palace.PalaceConfig: the embedder decision (an external API endpoint, then
+// Ollama, then the in-process model) included, exactly what the CLI's
+// palaceConfigFromCLI builds. openEmbedder in the palace package picks the
+// backend from these fields, so leaving them at the defaults would ignore a
+// configured embeddings_url and silently mine vectors into the wrong space.
+//
+// Paths are resolved by palacePaths, which owns their home-directory fallbacks.
+func resolvePalaceConfig(cfg config.Config) palace.PalaceConfig {
+	resolved := palace.DefaultConfig()
+	if p := cfg.Palace; p != nil {
+		if p.OllamaURL != "" {
+			resolved.OllamaURL = p.OllamaURL
+		}
+		if p.OllamaModel != "" {
+			resolved.OllamaModel = p.OllamaModel
+		}
+		if p.LocalEmbedder {
+			resolved.UseOllama = false
+		}
+		if p.EmbeddingsURL != "" {
+			resolved.APIEmbedderURL = config.ResolveEnvValue(p.EmbeddingsURL)
+			resolved.APIEmbedderModel = config.ResolveEnvValue(p.EmbeddingsModel)
+			resolved.APIEmbedderKey = config.ResolveEnvValue(p.EmbeddingsAPIKey)
+		}
+	}
+	resolved.DBPath, resolved.ModelPath = palacePaths(cfg)
+	return resolved
+}
+
 // palaceHasContent reports whether the palace holds at least one drawer. A
 // count error counts as "no content": the tools would fail anyway, and the
 // question is only whether advertising them is worth the tokens.
@@ -330,15 +360,15 @@ func setupPalace(o options, cfg config.Config, worker *memory.Worker) ([]adktool
 	if !o.palaceEnabled {
 		return nil, "", noop
 	}
-	dbPath, modelPath := palacePaths(cfg)
-	if dbPath == "" {
+	palaceCfg := resolvePalaceConfig(cfg)
+	if palaceCfg.DBPath == "" {
 		return nil, "", noop
 	}
-	if _, err := os.Stat(dbPath); err != nil {
+	if _, err := os.Stat(palaceCfg.DBPath); err != nil {
 		return nil, "", noop
 	}
 
-	p, err := palace.New(palace.WithDBPath(dbPath), palace.WithModelPath(modelPath))
+	p, err := palace.New(palace.WithConfig(palaceCfg))
 	if err != nil {
 		slog.Warn("piagent: palace disabled", "error", err)
 		return nil, "", noop
