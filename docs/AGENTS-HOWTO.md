@@ -15,7 +15,7 @@ This guide explains how to configure pi-go's extension system — skills, agent 
 | Skill selection index | `~/.claude/INDEX.md` | (bundled `agents-md` skill handles this) | n/a |
 | Hooks | `~/.claude/settings.json` → `hooks` | Hooks | `~/.pi-go/config.json` → `hooks` |
 | MCP servers | `~/.claude/settings.json` → `mcpServers` | MCP servers | `~/.pi-go/config.json` → `mcp.servers` |
-| Subagent types | Agent tool with `subagent_type` | Named agent definitions | `~/.pi-go/agents/<name>.md` or `.pi-go/agents/<name>.md` |
+| Subagent types | Agent tool with `subagent_type` | Named agent definitions | `~/.pirate/agents/<name>.md` or `.pirate/agents/<name>.md` |
 
 The key structural difference is priority: pi-go loads **bundled → user (`~/.pi-go/`) → project (`.pi-go/`)**, with later layers overriding earlier ones. Claude Code does the same for skills (global → project).
 
@@ -235,7 +235,7 @@ Check the proposed design against:
 - Does it fit the existing Init→Update→View (TUI) or agent→tool→callback (core) patterns?
 - Does it introduce new external dependencies? (Must be pure Go, no CGO)
 - Does it add a new tool? Register in tools.CoreTools(), add to DESCRIPTION.md tool table.
-- Does it add a new subagent type? Define in internal/subagent/bundled/ or .pi-go/agents/.
+- Does it add a new subagent type? Define in internal/subagent/bundled/ or .pirate/agents/.
 ```
 
 ---
@@ -344,18 +344,28 @@ These ship with the binary and are always available:
 ### Custom Agent Definitions
 
 Create custom agents at:
-- `~/.pi-go/agents/<name>.md` (user-level)
-- `.pi-go/agents/<name>.md` (project-level, overrides user)
+- `~/.pirate/agents/<name>.md` (user-level)
+- `.pirate/agents/<name>.md` (project-level, overrides user)
 
-Format matches the bundled agents:
+Note: an existing `~/.pi-go` home directory is migrated to `~/.pirate`
+automatically on first run (the old directory is left untouched); a
+project-level `.pi-go/` is neither migrated nor read — rename it to `.pirate/`
+manually.
+
+Frontmatter supports the full key set documented in
+[Usage → Agents](usage.md#agents) — `timeout:` with unit suffixes,
+`fallback-models:` and `streamIdleTimeout:` included:
 
 ```markdown
 ---
 name: security-auditor
 description: Audit Go code for OWASP vulnerabilities and pi-go-specific security patterns.
 role: slow
+fallback-models: mycompany/model-x, mycompany/model-x-lite
 worktree: false
 tools: read, grep, find, git-file-diff
+timeout: 30m
+streamIdleTimeout: 90s
 ---
 
 You are a security auditor specializing in Go. Your job is to find security issues, not fix them.
@@ -457,7 +467,7 @@ Already exists as `check-linters-before-commit`.
 ### `.pi-go/skills/code-guidelines-go/SKILL.md`
 Already exists — Go conventions specific to this codebase.
 
-### `.pi-go/agents/security-auditor.md`
+### `.pirate/agents/security-auditor.md`
 Create per the example above for security-focused review passes.
 
 ### `~/.pi-go/config.json` — format on write
@@ -479,10 +489,10 @@ Create per the example above for security-focused review passes.
 
 | Task | What to create | Where |
 |---|---|---|
-| Project rules / architecture | `AGENTS.md` | `.pi-go/AGENTS.md` |
-| Teach agent a workflow | Skill `<name>/SKILL.md` | `.pi-go/skills/<name>/SKILL.md` |
+| Project rules / architecture | `AGENTS.md` | `.pirate/AGENTS.md` |
+| Teach agent a workflow | Skill `<name>/SKILL.md` | `.pirate/skills/<name>/SKILL.md` |
 | Reuse Claude Code skills | Nothing — auto-discovered | `.claude/skills/` (already read; disable with `disableLegacySkillDirs`) |
-| Run shell commands on tool events | `hooks` in config | `.pi-go/config.json` |
-| Define a new subagent type | `<name>.md` | `.pi-go/agents/<name>.md` |
-| Add an external tool server | `mcp.servers` in config | `.pi-go/mcp.json` |
-| Global defaults (model, limits) | `config.json` | `~/.pi-go/config.json` |
+| Run shell commands on tool events | `hooks` in config | `.pirate/config.json` |
+| Define a new subagent type | `<name>.md` | `.pirate/agents/<name>.md` |
+| Add an external tool server | `mcp.servers` in config | `.pirate/mcp.json` |
+| Global defaults (model, limits) | `config.json` | `~/.pirate/config.json` |
