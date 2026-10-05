@@ -329,6 +329,15 @@
           }
         }
       }
+    },
+    "skillsDirs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Overrides the default skill directory discovery. When set, only these directories are searched (plus bundled skills and plugins); the user-level ~/.pirate/skills and the project .pirate/skills, .claude/skills, .cursor/skills directories are skipped. PI_SKILLS_DIRS (colon-separated, like PATH) overrides per process."
+    },
+    "disableLegacySkillDirs": {
+      "type": "boolean",
+      "description": "Excludes .claude/skills and .cursor/skills from skill discovery. .pirate/skills and ~/.pirate/skills are unaffected. PI_DISABLE_LEGACY_SKILLS=1 overrides per process."
     }
   },
   "definitions": {

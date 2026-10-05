@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/extension"
 )
 
@@ -33,7 +34,7 @@ func TestDefaultSkillDirsIn(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	dirs := extension.DefaultSkillDirsIn(tmpDir)
+	dirs := extension.DefaultSkillDirsIn(tmpDir, config.Config{})
 
 	// Should return at least the user skills dir when home dir is available
 	if homeDir, err := os.UserHomeDir(); err == nil {

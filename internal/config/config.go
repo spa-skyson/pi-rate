@@ -37,6 +37,14 @@ const DefaultMidTurnAttempts = 3
 // EnvMidTurnAttempts overrides midTurnAttempts from the environment.
 const EnvMidTurnAttempts = "PI_MIDTURN_ATTEMPTS"
 
+// EnvSkillsDirs overrides skillsDirs from the environment. Colon-separated
+// list of directories (like PATH).
+const EnvSkillsDirs = "PI_SKILLS_DIRS"
+
+// EnvDisableLegacySkillDirs overrides disableLegacySkillDirs from the environment.
+// Set to "1" or "true" to disable .claude/skills and .cursor/skills.
+const EnvDisableLegacySkillDirs = "PI_DISABLE_LEGACY_SKILLS"
+
 // HookConfig defines a shell command hook for tool call events.
 type HookConfig struct {
 	Event   string   `json:"event"`
@@ -265,6 +273,17 @@ type Config struct {
 	// into the global config file by an unrelated operation such as
 	// SaveDefaultRole. Read both together with LLMSSources.
 	InferredLLMS []LLMSSource `json:"-"`
+	// SkillsDirs overrides the default skill directory discovery. When set,
+	// only these directories are searched (plus bundled skills). When empty,
+	// the default discovery applies (~/.pirate/skills + .pirate/skills +
+	// .claude/skills + .cursor/skills). Entries are absolute paths, or
+	// relative to the working directory. PI_SKILLS_DIRS (colon-separated,
+	// like PATH) overrides it per process.
+	SkillsDirs []string `json:"skillsDirs,omitempty"`
+	// DisableLegacySkillDirs excludes .claude/skills and .cursor/skills
+	// from discovery. .pirate/skills and ~/.pirate/skills are unaffected.
+	// PI_DISABLE_LEGACY_SKILLS ("1"/"true") overrides it per process.
+	DisableLegacySkillDirs bool `json:"disableLegacySkillDirs,omitempty"`
 }
 
 // PalaceConfig holds settings for the MemPalace memory system.
