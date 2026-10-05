@@ -51,11 +51,10 @@ func runMemoryInit(dir, wing string) error {
 		return fmt.Errorf("creating palace directory: %w", err)
 	}
 
-	// Open the palace to run migrations and verify the DB is usable.
-	p, err := palace.New(
-		palace.WithDBPath(dbPath),
-		palace.WithModelPath(defaultPalaceModelPath()),
-	)
+	// Open the palace to run migrations and verify the DB is usable. The
+	// config travels whole, like in every other memory command, so init
+	// honors the configured embedder instead of probing Ollama by default.
+	p, err := palace.New(palace.WithConfig(resolvePalaceConfig(dbPath, defaultPalaceModelPath())))
 	if err != nil {
 		return fmt.Errorf("initializing palace: %w", err)
 	}
