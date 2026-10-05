@@ -37,8 +37,8 @@ const DefaultMidTurnAttempts = 3
 // EnvMidTurnAttempts overrides midTurnAttempts from the environment.
 const EnvMidTurnAttempts = "PI_MIDTURN_ATTEMPTS"
 
-// EnvSkillsDirs overrides skillsDirs from the environment. Colon-separated
-// list of directories (like PATH).
+// EnvSkillsDirs is a path-separated list of directories (";" on Windows,
+// ":" otherwise — both accepted). Overrides config.json `skillsDirs:`.
 const EnvSkillsDirs = "PI_SKILLS_DIRS"
 
 // EnvDisableLegacySkillDirs overrides disableLegacySkillDirs from the environment.

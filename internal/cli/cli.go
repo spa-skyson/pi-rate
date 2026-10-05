@@ -718,11 +718,12 @@ func startPprofServer() {
 	}
 	pprofOnce.Do(func() {
 		addr := ":" + flagPprofPort
+		profile := flagPprof
 		go func() {
 			slog.Info("pprof server listening",
 				"addr", addr,
-				"profile", flagPprof,
-				"collect_with", "go tool pprof http://localhost:"+flagPprofPort+"/debug/pprof/heap")
+				"profile", profile,
+				"collect_with", "go tool pprof http://localhost"+addr+"/debug/pprof/heap")
 			if err := http.ListenAndServe(addr, nil); err != nil {
 				slog.Error("pprof server error", "error", err)
 			}
