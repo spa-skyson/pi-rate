@@ -1076,9 +1076,13 @@ func loadInstructionPartsFrom(baseInstruction, cwd, home string) InstructionPart
 		parts.Rules = "\n\n# Project Rules\n\n" + strings.Join(contents, "\n\n")
 	}
 
-	// Get skills.
-	skillDirs := extension.DefaultSkillDirsIn(cwd)
-	skills, err := extension.LoadSkills(skillDirs...)
+	// Get skills. Skill discovery (skillsDirs / disableLegacySkillDirs, or
+	// PI_SKILLS_DIRS / PI_DISABLE_LEGACY_SKILLS) follows the loaded config.
+	// A config load failure is not fatal here: LoadFrom still returns the
+	// merged-so-far config, and skill discovery with no skill settings is
+	// simply the default one.
+	cfg, _ := config.LoadFrom(cwd)
+	skills, err := extension.LoadSkills(extension.DefaultSkillDirsIn(cwd, cfg)...)
 	if err == nil && len(skills) > 0 {
 		parts.Skills = appendSkillsMenu(skills)
 	}

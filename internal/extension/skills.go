@@ -455,23 +455,40 @@ func SkillBodySize(skills []Skill, name string) (int, bool) {
 // It returns user-level (~/.pirate/skills) plus project-level directories
 // (.pirate/skills, .claude/skills, .cursor/skills) found by walking up
 // from the current working directory.
+//
+// The config's skill settings are read via config.LoadFrom relative to the
+// process working directory; callers that already hold a Config should call
+// DefaultSkillDirsIn with it instead of paying for a second load here.
 func DefaultSkillDirs() []string {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
 	}
-	return DefaultSkillDirsIn(cwd)
+	cfg, err := config.LoadFrom(cwd)
+	if err != nil {
+		notice.Notifyf("warning: could not load config for skill discovery: %v", err)
+		cfg = config.Config{}
+	}
+	return DefaultSkillDirsIn(cwd, cfg)
 }
 
 // DefaultSkillDirsIn returns skill directories relative to the given root.
 // Installed plugins come first (lowest priority), then the user-level skill
 // directory (~/.pirate/skills), then the project-level directories
-// (.pirate/skills, .claude/skills, .cursor/skills) found by walking up from root.
+// (.pirate/skills, .claude/skills, .cursor/skills) found by walking up from
+// root.
 //
 // Order is precedence: a later directory overrides an earlier one, so a plugin
 // can never silently replace a skill the user wrote or customized under the
 // same name.
-func DefaultSkillDirsIn(root string) []string {
+//
+// cfg controls discovery (issue #59): SkillsDirs (or PI_SKILLS_DIRS) replaces
+// the user- and project-level directories with an explicit list — plugins and
+// bundled skills stay — and DisableLegacySkillDirs (or
+// PI_DISABLE_LEGACY_SKILLS) drops .claude/skills and .cursor/skills while
+// keeping .pirate/skills and ~/.pirate/skills. A zero Config keeps the default
+// discovery.
+func DefaultSkillDirsIn(root string, cfg config.Config) []string {
 	dirs := make([]string, 0, 8)
 	seen := make(map[string]struct{}, 8)
 	add := func(dir string) {
@@ -497,17 +514,31 @@ func DefaultSkillDirsIn(root string) []string {
 		}
 	}
 
+	// An explicit directory list replaces the user- and project-level
+	// discovery. Plugins stay in front so their skills keep losing name
+	// conflicts to the configured directories, exactly as to user ones.
+	if override := cfg.ResolveSkillDirs(); len(override) > 0 {
+		for _, dir := range override {
+			add(dir)
+		}
+		return dirs
+	}
+
 	// User-level skill directory.
 	if homeDir != "" {
 		add(filepath.Join(config.PirateHome(), "skills"))
 	}
 
 	// Project-level skill directories, walking up from root.
-	for _, rel := range []string{
+	projectRel := []string{
 		filepath.Join(config.ProjectDirName, "skills"),
 		filepath.Join(".claude", "skills"),
 		filepath.Join(".cursor", "skills"),
-	} {
+	}
+	if cfg.ResolveDisableLegacySkillDirs() {
+		projectRel = projectRel[:1]
+	}
+	for _, rel := range projectRel {
 		add(findNearestDir(root, rel))
 	}
 

@@ -6,6 +6,7 @@ import (
 	acp "github.com/coder/acp-go-sdk"
 
 	"github.com/spa-skyson/pi-rate/internal/acp/server/adapter"
+	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/extension"
 	"github.com/spa-skyson/pi-rate/internal/subagent"
 )
@@ -16,7 +17,14 @@ import (
 func DiscoverAvailableCommands(cwd string) []acp.AvailableCommand {
 	cwd = normalizeDiscoveryCWD(cwd)
 
-	skills, _ := extension.LoadSkills(extension.DefaultSkillDirsIn(cwd)...)
+	// Skill discovery honors skillsDirs / disableLegacySkillDirs (and their
+	// env overrides) from config.json; a load failure falls back to the
+	// default discovery.
+	cfg, err := config.LoadFrom(cwd)
+	if err != nil {
+		cfg = config.Config{}
+	}
+	skills, _ := extension.LoadSkills(extension.DefaultSkillDirsIn(cwd, cfg)...)
 
 	var subagents []subagent.AgentConfig
 	if discovery, err := subagent.DiscoverAgents(cwd, subagent.ScopeBoth); err == nil && discovery != nil {

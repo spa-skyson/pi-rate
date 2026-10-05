@@ -1027,7 +1027,7 @@ func runNonInteractive(
 
 	allToolsets := buildToolsets(cfg)
 
-	loadNonInteractiveSkills(mode)
+	loadNonInteractiveSkills(mode, cfg, cwd)
 	instruction += memoryInstructionContext(parentCtx, memStore, cfg, cwd)
 
 	sessionsPath, sessionSvc, err := openSessionService()
@@ -1201,8 +1201,8 @@ func armMemoryObservationSession(ctx context.Context, memStore memory.Store, ses
 
 // loadNonInteractiveSkills loads the skill set and reports what it found.
 // Skills are optional: a load failure is a warning, not a fatal error.
-func loadNonInteractiveSkills(mode string) {
-	skills, err := extension.LoadSkills(extension.DefaultSkillDirs()...)
+func loadNonInteractiveSkills(mode string, cfg config.Config, cwd string) {
+	skills, err := extension.LoadSkills(extension.DefaultSkillDirsIn(cwd, cfg)...)
 	if mode == "print" {
 		fmt.Fprint(os.Stderr, formatPrintSkillLoad(len(skills), err))
 	}
