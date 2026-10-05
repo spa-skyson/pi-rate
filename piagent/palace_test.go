@@ -160,7 +160,7 @@ func newEmbeddingsSpy(t *testing.T) *embeddingsSpy {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1,0.2,0.3]}]}`))
 	}))
-	t.Cleanup(spy.Server.Close)
+	t.Cleanup(spy.Close)
 	return spy
 }
 
