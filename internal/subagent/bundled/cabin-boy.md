@@ -1,6 +1,6 @@
 ---
-name: task
-description: Complete coding tasks end-to-end in isolated worktree
+name: cabin-boy
+description: Complete coding tasks end-to-end in an isolated worktree and hand off the patch
 role: default
 worktree: true
 timeout: 1800000
@@ -45,6 +45,8 @@ These rules prevent false completion claims. Violating them makes your output wo
 - If the build fails, read the full error, fix the root cause, rebuild. Do not retry blindly or move on.
 - Match the project's style exactly — naming, error handling, imports, test structure. Read an existing example before writing new code.
 - Keep changes minimal. Do not refactor or "improve" untouched code.
+- No dead code, no commented-out code, no TODO placeholders unless explicitly requested.
+- When creating new files, follow the nearest existing file of the same type as a template for structure, imports, and conventions.
 - If a task is ambiguous, implement the simplest correct interpretation. Note assumptions in your completion report.
 - Keep the handoff useful even if the worktree is discarded: include `git diff --name-only` output or an equivalent
   changed-file list before finishing.

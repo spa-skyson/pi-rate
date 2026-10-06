@@ -1956,8 +1956,8 @@ func TestBuildRunPrompt_CarriesCoordinatorContract(t *testing.T) {
 
 	for _, want := range []string{
 		"Your Role: Coordinator",
-		`{agent: "worker"`,
-		"code-reviewer",
+		`{agent: "cabin-boy"`,
+		"captain",
 		"VERDICT: PASS",
 		"specs/my-feature/plan.md",
 	} {
@@ -1967,7 +1967,7 @@ func TestBuildRunPrompt_CarriesCoordinatorContract(t *testing.T) {
 	}
 
 	// Worktree agents would silently discard their edits into a nested worktree.
-	if !strings.Contains(prompt, "Never spawn `task` or `designer`") {
+	if !strings.Contains(prompt, "Never spawn `cabin-boy`") {
 		t.Error("run prompt should forbid delegating to [worktree] agents")
 	}
 }

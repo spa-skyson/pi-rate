@@ -211,19 +211,11 @@ Orchestrator
 └── WorktreeManager (git worktree isolation)
 
 Agent Types:
-├── explore          → fast, read-only research (smol model)
-├── plan             → analysis & planning (plan model)
-├── designer         → code creation (slow model, worktree)
-├── task             → full coding tasks (default model, worktree)
-├── quick-task       → small focused tasks (smol model)
-├── worker           → background processing (default model)
-├── code-reviewer    → code review (slow model)
-├── spec-reviewer    → design document review (slow model)
-├── memory-compressor → observation compression, internal use (smol model)
-├── discovery        → agent capability enumeration (smol model)
-├── claude           → ACP bridge to Claude Code CLI
-├── cursor           → ACP bridge to Cursor CLI
-└── gemini           → ACP bridge to Gemini CLI
+├── captain          → orchestration: task decomposition, conflict arbitration, architecture decisions, code review (slow model)
+├── first-mate       → planning: vertically-sliced implementation plans and spec reviews (plan model)
+├── skipper          → fast, read-only research (smol model)
+├── cabin-boy        → full coding tasks (default model, worktree)
+└── memory-compressor → observation compression, internal use (smol model)
 ```
 
 **Execution Flow:**

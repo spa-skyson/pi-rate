@@ -339,10 +339,10 @@ func TestToSpawnInput_UnknownType(t *testing.T) {
 }
 
 // TestToSpawnInput_KnownBundled exercises the success path of ToSpawnInput
-// using a known bundled type like "explore".
+// using a known bundled type like "skipper".
 func TestToSpawnInput_KnownBundled(t *testing.T) {
 	in := AgentInput{
-		Type:       "explore",
+		Type:       "skipper",
 		Prompt:     "find the bug",
 		WorkDir:    "/tmp",
 		Background: true,
@@ -351,8 +351,8 @@ func TestToSpawnInput_KnownBundled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToSpawnInput: %v", err)
 	}
-	if out.Agent.Name != "explore" {
-		t.Errorf("agent name = %q, want explore", out.Agent.Name)
+	if out.Agent.Name != "skipper" {
+		t.Errorf("agent name = %q, want skipper", out.Agent.Name)
 	}
 	if out.Prompt != "find the bug" {
 		t.Errorf("prompt = %q", out.Prompt)

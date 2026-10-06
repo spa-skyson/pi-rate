@@ -376,7 +376,7 @@ remote pairing via web server + QR.
 
 | Subsystem | What it does |
 |---|---|
-| [internal/subagent](../internal/subagent) | Typed agents (explore/plan/designer/reviewer/task/quick_task) from frontmattered `.md`, concurrency pool, **git worktree isolation per agent**, parallel plan execution with gate commands and branch merging; can also drive external Claude/Gemini agents over ACP |
+| [internal/subagent](../internal/subagent) | Typed agents (captain/first-mate/skipper/cabin-boy/memory-compressor) from frontmattered `.md`, concurrency pool, **git worktree isolation per agent**, parallel plan execution with gate commands and branch merging; can also drive external Claude/Gemini agents over ACP |
 | [internal/memory](../internal/memory) | Observational memory: tool calls captured in callbacks → SQLite+FTS5, background compression via a `smol` subagent, keyword/semantic search |
 | [internal/palace](../internal/palace) | Memory Palace: 4-layer memory (identity / essential story / recall / search), wings+rooms drawers from `mempalace.yaml`, MiniLM embeddings with FTS5 fallback, knowledge-graph triples, miners, `pi memory` CLI |
 | [internal/guardrail](../internal/guardrail) | Daily token budget enforcement (`usage.json`, default 50M/day) |

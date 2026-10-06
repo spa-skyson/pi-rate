@@ -250,7 +250,7 @@ Worktree agents:
 
 Reviewing a committed change (single mode, base):
 - A worktree is created at HEAD, so an agent sent to review an already-committed change sees a clean tree and an empty diff. Pass base to compare against that commit instead:
-  {agent: "code-reviewer", task: "...", base: "main"}
+  {agent: "captain", task: "...", base: "main"}
 - The worktree holds the current tip with its index at base, so the agent sees base..HEAD as a pending diff via git diff, and reads post-change file content.
 - This works for read-only agents too: base creates the worktree even when the agent's own definition sets none, which is what makes a read-only reviewer usable.
 - Reviewing a branch before merging: pass its merge base. For a pull request merged long ago, base alone compares against the current tip, so check that commit out first if you need exactly that diff.

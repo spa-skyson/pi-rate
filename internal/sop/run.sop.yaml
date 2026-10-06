@@ -35,7 +35,7 @@ stages:
     description: One worker per slice; slices marked parallel-safe run together
     fan_out:
       over: plan.slices
-      agent: worker
+      agent: cabin-boy
       group_by: parallel_safe
       max_concurrency: 3
       isolation: sub_branch
@@ -62,7 +62,7 @@ stages:
 
   - id: verify
     description: Check the diff against the Done Criteria
-    agent: code-reviewer
+    agent: captain
     inputs: [diff, done_criteria, slice_results]
     output_schema: Verdict
     routes:
@@ -73,7 +73,7 @@ stages:
     description: Dispatch fix workers for the unmet criteria, then verify again
     fan_out:
       over: verdict.unmet
-      agent: worker
+      agent: cabin-boy
       max_concurrency: 2
       output_schema: SliceResult
     loop_back: verify

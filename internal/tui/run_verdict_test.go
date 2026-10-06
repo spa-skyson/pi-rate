@@ -159,8 +159,8 @@ func TestRunAttributionCarriesRunIdentity(t *testing.T) {
 	if got.Slice != 3 || got.Cycle != 2 {
 		t.Errorf("slice/cycle = %d/%d, want 3/2", got.Slice, got.Cycle)
 	}
-	if got.AgentType != "task" {
-		t.Errorf("AgentType = %q, want task", got.AgentType)
+	if got.AgentType != "cabin-boy" {
+		t.Errorf("AgentType = %q, want cabin-boy", got.AgentType)
 	}
 	// The agent's own ID and worktree are the orchestrator's to fill in.
 	if got.AgentID != "" || got.Worktree != "" {

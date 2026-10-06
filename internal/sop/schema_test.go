@@ -113,7 +113,7 @@ sop: run
 version: 2
 stages:
   - id: build
-    agent: designer
+    agent: cabin-boy
     next: done
   - id: done
     kind: function
@@ -183,7 +183,7 @@ sop: plan
 version: 2
 stages:
   - id: a
-    agent: plan
+    agent: first-mate
     review:
       kind: agent
       agent: spec-reviewer

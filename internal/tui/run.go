@@ -239,9 +239,9 @@ every diff until the provider drops the stream mid-slice.
 
 Spawn ONE worker per slice with the ` + "`" + `subagent` + "`" + ` tool:
 
-- ` + "`" + `{agent: "worker", task: "<self-contained brief>"}` + "`" + ` — the default.
-- ` + "`" + `{agent: "quick-task", task: "..."}` + "`" + ` — a single-file mechanical change.
-- ` + "`" + `{tasks: [{agent: "worker", task: "..."}, ...]}` + "`" + ` — several slices at once, ONLY
+- ` + "`" + `{agent: "cabin-boy", task: "<self-contained brief>"}` + "`" + ` — the default.
+- ` + "`" + `{agent: "cabin-boy", task: "..."}` + "`" + ` — a single-file mechanical change.
+- ` + "`" + `{tasks: [{agent: "cabin-boy", task: "..."}, ...]}` + "`" + ` — several slices at once, ONLY
   when the plan marks them parallel-safe, they touch disjoint files, AND the
   ` + "`" + `subagent` + "`" + ` tool description says this process runs more than one subagent at a
   time. Batching past that number does not overlap anything: the extra tasks
@@ -249,9 +249,9 @@ Spawn ONE worker per slice with the ` + "`" + `subagent` + "`" + ` tool:
   how a "parallel" batch turns into a timeout. When in doubt, dispatch one
   slice per call — sequential slices are the normal case.
 
-**Never spawn ` + "`" + `task` + "`" + ` or ` + "`" + `designer` + "`" + `.** They are [worktree] agents: their edits go to
+**Never spawn ` + "`" + `cabin-boy` + "`" + ` for a slice.** It is a [worktree] agent: its edits go to
 a nested worktree that is never merged back, so the slice silently produces
-nothing. ` + "`" + `worker` + "`" + ` and ` + "`" + `quick-task` + "`" + ` edit the current directory, which is what you want.
+nothing.
 
 Each worker brief must stand alone — the worker cannot see this conversation.
 State the exact files, the change, the surrounding conventions, and the verify
@@ -271,7 +271,7 @@ was never verified is worse than an unchecked one — it ends the run early.
 
 Spawn the Verifier and act on its verdict:
 
-` + "`" + `{agent: "code-reviewer", task: "Check the working-tree diff against these Done Criteria: <paste the Done Criteria from the briefing above, or the Acceptance Criteria if absent>. For each criterion answer MET or NOT MET with the file and line that proves it. Flag any stub, TODO, or panic(\"not implemented\") left in the changed files. End your reply with exactly one line: VERDICT: PASS or VERDICT: FAIL."}` + "`" + `
+` + "`" + `{agent: "captain", task: "Check the working-tree diff against these Done Criteria: <paste the Done Criteria from the briefing above, or the Acceptance Criteria if absent>. For each criterion answer MET or NOT MET with the file and line that proves it. Flag any stub, TODO, or panic(\"not implemented\") left in the changed files. End your reply with exactly one line: VERDICT: PASS or VERDICT: FAIL."}` + "`" + `
 
 - **VERDICT: FAIL** — dispatch fix workers for the NOT MET items, then verify again.
   Repeat up to 10 cycles.
@@ -518,7 +518,7 @@ func (m *model) startRunAgent(
 	// The fallback-capable spawn keeps the run's event stream whole across a
 	// model restart: the run state subscribes once and reads every attempt.
 	events, agentID, err := m.cfg.Orchestrator.SpawnWithInputFallback(m.ctx, subagent.AgentInput{
-		Type:         "task",
+		Type:         "cabin-boy",
 		Prompt:       prompt,
 		Worktree:     new(true),
 		WorktreeName: runWorktreeName(specName, ""),
@@ -583,7 +583,7 @@ func (m *model) handleRunParallel(specName, promptMD string, gates []Gate, check
 
 	// Spawn agent 1.
 	events1, agentID1, err := m.cfg.Orchestrator.SpawnWithInputFallback(m.ctx, subagent.AgentInput{
-		Type:         "task",
+		Type:         "cabin-boy",
 		Prompt:       prompt1,
 		Worktree:     &useWorktree,
 		WorktreeName: runWorktreeName(specName, "part-1"),
@@ -601,7 +601,7 @@ func (m *model) handleRunParallel(specName, promptMD string, gates []Gate, check
 
 	// Spawn agent 2.
 	events2, agentID2, err := m.cfg.Orchestrator.SpawnWithInputFallback(m.ctx, subagent.AgentInput{
-		Type:         "task",
+		Type:         "cabin-boy",
 		Prompt:       prompt2,
 		Worktree:     &useWorktree,
 		WorktreeName: runWorktreeName(specName, "part-2"),
@@ -1067,7 +1067,7 @@ func (m *model) retryRun(reason, extraContext string) tea.Cmd {
 
 		var err error
 		events, agentID, err = m.cfg.Orchestrator.SpawnWithInputFallback(m.ctx, subagent.AgentInput{
-			Type:        "task",
+			Type:        "cabin-boy",
 			Prompt:      prompt,
 			WorkDir:     wtPath,
 			SkipCleanup: true,
@@ -2139,7 +2139,7 @@ func newRunID(specName string) string {
 // first agent of a run is spawned before the run state exists.
 func runAttribution(runID, specName, parentSession string, slice, cycle int) *session.AgentContext {
 	return &session.AgentContext{
-		AgentType: "task",
+		AgentType: "cabin-boy",
 		RunID:     runID,
 		SpecName:  specName,
 		Slice:     slice,

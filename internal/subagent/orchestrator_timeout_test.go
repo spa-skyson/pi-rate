@@ -145,10 +145,14 @@ done
 
 // TestSpawnWithInput_CarriesTimeout covers the legacy AgentInput path, which
 // has to forward the timeout through ToSpawnInput or the override is silently
-// dropped for every caller still on the old API — including `/run`.
+// dropped for every caller still on the old API — including `/run`. "claude"
+// left the bundled set with the crew refactor, so the bundled-only ToSpawnInput
+// hop runs on a bundled name ("cabin-boy"); the registry keeps a same-named
+// "claude" entry to prove a user-style agent can still ride the ACP dispatch
+// path the fake session intercepts.
 func TestSpawnWithInput_CarriesTimeout(t *testing.T) {
 	in := AgentInput{
-		Type:    "claude",
+		Type:    "cabin-boy",
 		Prompt:  "go",
 		Timeout: 90_000,
 	}
@@ -160,10 +164,13 @@ func TestSpawnWithInput_CarriesTimeout(t *testing.T) {
 	if spawnIn.Timeout != in.Timeout {
 		t.Fatalf("SpawnInput.Timeout = %d, want %d", spawnIn.Timeout, in.Timeout)
 	}
+	in.Type = "claude"
 
 	gotOpts := captureSpawnOpts(t)
 	// SpawnWithInput resolves the agent through the orchestrator's registry,
-	// so "claude" must be registered even though it is a bundled name.
+	// so "claude" must be registered even though it is no longer a bundled
+	// name — the registry lookup is how a user-defined agent with the same
+	// name reaches the ACP dispatch path this fake session intercepts.
 	orch := NewOrchestrator(testConfig(), "", []AgentConfig{{Name: "claude"}})
 	t.Cleanup(orch.Shutdown)
 
