@@ -185,7 +185,7 @@ func TestDefaultPDDSOP_ForbidsWorktreeAgents(t *testing.T) {
 	if !contains(DefaultPDDSOP, "Never delegate to a [worktree] agent") {
 		t.Error("default PDD SOP should forbid delegating to [worktree] agents")
 	}
-	if !contains(DefaultPDDSOP, "explore") {
+	if !contains(DefaultPDDSOP, "skipper") {
 		t.Error("default PDD SOP should name the research subagent to delegate to")
 	}
 }

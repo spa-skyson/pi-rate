@@ -134,12 +134,18 @@ func lintAgents(def *Definition) validate.Findings {
 				"known agents: "+strings.Join(names, ", ")))
 			continue
 		}
-		if cfg.Worktree {
+		// A [worktree] agent is only safe when the graph says where its edits
+		// land: a per-run workspace owns a worktree the merge stage merges, and
+		// a "none" workspace pins every stage to the invoking directory, which
+		// the runner turns into an explicit WorkDir that overrides the agent's
+		// worktree default. With no workspace policy declared, the agent's own
+		// default wins and its edits vanish in a nested worktree.
+		if cfg.Worktree && def.Workspace.Worktree == "" {
 			out = append(out, stageFinding(def, s, "worktree_agent",
 				fmt.Sprintf("stage %q dispatches to %q, which runs in its own worktree", s.ID, name),
 				"a [worktree] agent's edits land in a nested worktree that is never merged, "+
-					"so the stage silently produces nothing — use `worker` or `quick-task`, "+
-					"which edit the current directory"))
+					"so the stage silently produces nothing — run it as a fan_out stage "+
+					"inside a per-run workspace, or edit the current directory yourself"))
 		}
 		if s.Review != nil && s.Review.Kind == "agent" && s.Review.Agent != "" && len(s.Routes) == 0 {
 			out = append(out, stageFinding(def, s, "unrouted_verdict",

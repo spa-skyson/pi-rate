@@ -31,7 +31,7 @@ You can reference rough-idea.md for the original idea.
 ### Phase 3: Objective Research
 - Delegate research to subagents rather than reading files into your own context.
   Split the question into 2-5 independent angles and dispatch them in ONE parallel
-  ` + "`" + `subagent` + "`" + ` call: ` + "`" + `{tasks: [{agent: "explore", task: "..."}, ...]}` + "`" + `.
+  ` + "`" + `subagent` + "`" + ` call: ` + "`" + `{tasks: [{agent: "skipper", task: "..."}, ...]}` + "`" + `.
   Each angle gets its own agent, and each returns findings — not file contents.
   This keeps the planning session's context small enough to reach Phase 7.
 - Explore the codebase to understand relevant existing code
@@ -179,12 +179,11 @@ Follow the conventions in specs/AGENTS.md for spec directory structure and namin
 - Be thorough but efficient — ask only necessary questions
 - Aim for plans with <50 distinct instructions per phase — large instruction counts degrade LLM compliance
 - **Delegate to subagents for anything small and self-contained** — a file lookup,
-  an API-shape check, a convention question. Spawn ` + "`" + `explore` + "`" + ` (research) or
-  ` + "`" + `quick-task` + "`" + ` (small edits); batch independent ones into a single parallel call,
+  an API-shape check, a convention question. Spawn ` + "`" + `skipper` + "`" + ` (research) or
+  ` + "`" + `captain` + "`" + ` (small checks); batch independent ones into a single parallel call,
   sized to the concurrency the ` + "`" + `subagent` + "`" + ` tool reports rather than to the number
   of questions you have.
   Read files directly only when you need the exact text in your own context.
-- **Never delegate to a [worktree] agent from /plan or /run** (` + "`" + `task` + "`" + `, ` + "`" + `designer` + "`" + `).
+- **Never delegate to a [worktree] agent from /plan or /run** (` + "`" + `cabin-boy` + "`" + `).
   Their edits land in a nested worktree that is never merged, so the work is lost.
-  Use ` + "`" + `worker` + "`" + ` or ` + "`" + `quick-task` + "`" + ` — they edit the current directory.
 `

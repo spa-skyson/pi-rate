@@ -327,19 +327,13 @@ These ship with the binary and are always available:
 
 | Name | Role | Worktree | Purpose |
 |---|---|---|---|
-| `explore` | smol | No | Fast read-only codebase research |
-| `plan` | plan | No | Architecture and design analysis |
-| `designer` | slow | Yes | Code creation in isolated worktree |
-| `task` | default | Yes | End-to-end coding tasks |
-| `quick-task` | smol | No | Small focused tasks |
-| `worker` | default | No | Background processing |
-| `code-reviewer` | slow | No | Code review |
-| `spec-reviewer` | slow | No | Design document review |
+| `captain` | slow | No | Orchestration: task decomposition, conflict arbitration, architecture decisions, code review |
+| `first-mate` | plan | No | Planning: vertically-sliced implementation plans and spec reviews |
+| `skipper` | smol | No | Fast read-only codebase research |
+| `cabin-boy` | default | Yes | End-to-end coding tasks in an isolated worktree |
 | `memory-compressor` | smol | No | Observation compression (internal) |
-| `discovery` | smol | No | Agent discovery / capability enumeration |
-| `claude` | — | No | ACP bridge to Claude Code CLI |
-| `cursor` | — | No | ACP bridge to Cursor CLI |
-| `gemini` | — | No | ACP bridge to Gemini CLI |
+
+The external CLI bridges (`claude`, `codex`, `copilot`, `cursor`, `gemini`, `agy`) are no longer bundled; their spawners remain in the binary and are available as custom agents with the same names.
 
 ### Custom Agent Definitions
 
@@ -395,8 +389,8 @@ Return findings as a structured list:
 /agents            # list running agents
 
 # From agent tool call (the agent calls this automatically when needed)
-agent(type="explore", prompt="find all places that call os.Root")
-agent(type="task", prompt="fix the nil pointer in internal/session/store.go:142")
+agent(type="skipper", prompt="find all places that call os.Root")
+agent(type="cabin-boy", prompt="fix the nil pointer in internal/session/store.go:142")
 ```
 
 ---

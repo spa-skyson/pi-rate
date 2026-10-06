@@ -22,10 +22,10 @@ import (
 func TestToSpawnInputCarriesWorktreeBase(t *testing.T) {
 	const base = "786cb47^"
 
-	// code-reviewer declares `worktree: false`, which is the case the field
+	// captain declares `worktree: false`, which is the case the field
 	// exists for: a base must be what creates the worktree, not the agent's
 	// own default.
-	in := AgentInput{Type: "code-reviewer", Prompt: "review", WorktreeBase: base}
+	in := AgentInput{Type: "captain", Prompt: "review", WorktreeBase: base}
 
 	spawn, err := in.ToSpawnInput()
 	if err != nil {
@@ -67,7 +67,7 @@ func TestSubagentToolBaseReachesWorktreeDiff(t *testing.T) {
 
 	// Enter at the conversion hop, the way internal/tools/subagent.go does.
 	spawn, err := AgentInput{
-		Type:         "code-reviewer",
+		Type:         "captain",
 		Prompt:       "review",
 		WorktreeBase: "HEAD~1",
 	}.ToSpawnInput()

@@ -93,7 +93,7 @@ stages:
 
   - id: fix
     description: Fix the failing checks in the working tree
-    agent: worker
+    agent: cabin-boy
     inputs: [failures.log, failing.json]
     timeout: 20m
     next: gates

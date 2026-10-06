@@ -22,7 +22,7 @@ defaults:
 stages:
   - id: clarify
     description: Clarify requirements with the user, one question at a time
-    agent: plan
+    agent: first-mate
     produces:
       - path: requirements.md
         validate:
@@ -37,7 +37,7 @@ stages:
     description: Establish how the code works today, in parallel, without reading it into this context
     fan_out:
       over: research_angles
-      agent: explore
+      agent: skipper
       max_concurrency: 4
       isolation: sub_branch
     produces:
@@ -50,7 +50,7 @@ stages:
 
   - id: design
     description: Write the standalone design document
-    agent: plan
+    agent: first-mate
     inputs: [requirements, research_summary]
     produces:
       - path: design.md
@@ -67,7 +67,7 @@ stages:
 
   - id: outline
     description: The cheap review checkpoint before the full plan
-    agent: plan
+    agent: first-mate
     produces:
       - path: outline.md
         validate:
@@ -81,7 +81,7 @@ stages:
 
   - id: plan
     description: Expand the outline into vertical slices
-    agent: plan
+    agent: first-mate
     produces:
       - path: plan.md
         validate:
@@ -92,7 +92,7 @@ stages:
           - outline_slices_match_plan_slices
     review:
       kind: agent
-      agent: spec-reviewer
+      agent: captain
       verdict_schema: Verdict
     routes:
       FAIL: plan
@@ -101,7 +101,7 @@ stages:
 
   - id: prompt
     description: Compress the plan into the execution briefing /run consumes
-    agent: plan
+    agent: first-mate
     produces:
       - path: PROMPT.md
         validate:

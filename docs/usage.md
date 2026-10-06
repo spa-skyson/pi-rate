@@ -126,7 +126,7 @@ explicit `OLLAMA_HOST` overrides both.
 Agents are markdown files with YAML frontmatter, discovered from
 `~/.pirate/agents/` (global) and `.pirate/agents/` (project). Same-named
 files resolve project > user > bundled; a set of agents ships bundled
-(explore, plan, task, code-reviewer, designer, claude, codex, gemini, …).
+(captain, first-mate, skipper, cabin-boy, memory-compressor).
 
 ```markdown
 ---
@@ -303,7 +303,7 @@ listed here is what ships.
 | `/commit`              | Create commit from staged changes                               |
 | `/diff`                | Fullscreen diff viewer (working tree / last commit)             |
 | `/plan`                | Start PDD planning session                                      |
-| `/run`                 | Execute a spec with task agent                                  |
+| `/run`                 | Execute a spec with the cabin-boy agent                          |
 | `/pr-autofix`          | Watch a GitHub PR's checks and fix them until it is green       |
 | `/retry`               | Re-send the prompt of a turn that failed                        |
 | `/skills`              | List skills (create, load)                                      |

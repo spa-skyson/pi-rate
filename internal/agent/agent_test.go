@@ -113,10 +113,10 @@ func TestNew(t *testing.T) {
 
 func TestSystemInstruction_SubagentWorktreeGuidance(t *testing.T) {
 	for _, phrase := range []string{
-		"isolated git worktrees",
+		"isolated git worktree",
 		"not automatically applied to the current tree",
 		"exact patch/file list",
-		`"worker"/"quick-task"`,
+		"cabin-boy",
 	} {
 		if !strings.Contains(SystemInstruction, phrase) {
 			t.Errorf("SystemInstruction should contain %q", phrase)

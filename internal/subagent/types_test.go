@@ -11,8 +11,8 @@ func TestBundledAgents_AllDefined(t *testing.T) {
 		t.Fatalf("LoadBundledAgents failed: %v", err)
 	}
 
-	// Should have exactly 18 bundled agents
-	expected := []string{"explore", "plan", "designer", "task", "quick-task", "worker", "code-reviewer", "spec-reviewer", "memory-compressor", "discovery", "claude", "gemini", "cursor", "copilot", "agy", "architect", "codex", "codex-review"}
+	// Should have exactly 5 bundled agents
+	expected := []string{"captain", "first-mate", "skipper", "cabin-boy", "memory-compressor"}
 	if len(agents) != len(expected) {
 		t.Errorf("expected %d bundled agents, got %d: %v", len(expected), len(agents), agentNames(agents))
 	}
@@ -38,7 +38,6 @@ func TestBundledAgents_RoleMappings(t *testing.T) {
 		"smol":    true,
 		"slow":    true,
 		"plan":    true,
-		"system":  true, // discovery agent uses system role
 	}
 
 	agents, err := LoadBundledAgents()
@@ -73,8 +72,8 @@ func TestBundledAgents_HaveInstructions(t *testing.T) {
 }
 
 func TestBundledAgents_WorktreeTypes(t *testing.T) {
-	// designer and task require worktrees.
-	worktreeTypes := map[string]bool{"designer": true, "task": true}
+	// cabin-boy is the only bundled agent that requires a worktree.
+	worktreeTypes := map[string]bool{"cabin-boy": true}
 
 	agents, err := LoadBundledAgents()
 	if err != nil {
@@ -116,13 +115,13 @@ func TestBundledAgents_WorktreeInstructionsDescribeHandoff(t *testing.T) {
 
 func TestAgentInput_ToSpawnInput(t *testing.T) {
 	// Test valid agent type
-	input := AgentInput{Type: "explore", Prompt: "test prompt"}
+	input := AgentInput{Type: "skipper", Prompt: "test prompt"}
 	spawnInput, err := input.ToSpawnInput()
 	if err != nil {
 		t.Fatalf("ToSpawnInput failed: %v", err)
 	}
-	if spawnInput.Agent.Name != "explore" {
-		t.Errorf("expected agent name 'explore', got %q", spawnInput.Agent.Name)
+	if spawnInput.Agent.Name != "skipper" {
+		t.Errorf("expected agent name 'skipper', got %q", spawnInput.Agent.Name)
 	}
 	if spawnInput.Prompt != "test prompt" {
 		t.Errorf("expected prompt 'test prompt', got %q", spawnInput.Prompt)
