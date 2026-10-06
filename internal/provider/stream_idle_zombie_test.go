@@ -121,7 +121,9 @@ func serveCompleteKeepAlive(conn net.Conn, body string) {
 // stopped talking. It unblocks only when the client tears the connection down
 // (the idle abort cancels the request context, and closing the in-flight
 // socket is what the side read reports) or on a safety timer, so a broken
-// abort fails the test instead of hanging it.
+// abort fails the test instead of hanging it. The timer sits 20× above the
+// scaled idle budget (25s vs 1250ms), so a working abort always wins the
+// race; only a broken abort path makes the test wait it out.
 func holdSilent(conn net.Conn, prelude string) {
 	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n%s", prelude)
 	gone := make(chan struct{})
@@ -136,7 +138,7 @@ func holdSilent(conn net.Conn, prelude string) {
 	}()
 	select {
 	case <-gone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(25 * time.Second):
 	}
 	conn.Close()
 }
@@ -186,7 +188,18 @@ func TestStreamIdleAbortDropsZombieConnectionBeforeRetry(t *testing.T) {
 	if opts.closeIdle == nil {
 		t.Fatal("NewAnthropic left opts.closeIdle unset; the idle watch would have nothing to close")
 	}
-	watched := idleStreamModel{inner: m, timeout: 250 * time.Millisecond, tick: 0, closeIdle: opts.closeIdle}
+	// The idle budget is 1250ms — the original 250ms scaled ×5, same move
+	// as the issue #61 fix: every duration in this test (the budget, the
+	// holdSilent and retry guards below) moved together, so the
+	// budget-vs-work proportions are unchanged. The parking turns are
+	// healthy traffic that must complete inside the budget, and on a
+	// loaded CI runner even a fully served turn (dial, request, one-shot
+	// response, drain) overran 250ms — the idle watch fired on the
+	// parking stage itself and the test died before its zombie stage
+	// (CI runs 37302981844, 37326239257). The zombie stage needs the
+	// budget only as silence to detect, so scaling it keeps that
+	// detection and both failure injections intact.
+	watched := idleStreamModel{inner: m, timeout: 1250 * time.Millisecond, tick: 0, closeIdle: opts.closeIdle}
 
 	req := &model.LLMRequest{Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Hi"}}}}}
 
@@ -241,9 +254,12 @@ func TestStreamIdleAbortDropsZombieConnectionBeforeRetry(t *testing.T) {
 			t.Error("retry completed without a response")
 		}
 	}()
+	// 25s mirrors the old 5s guard scaled ×5 with the budget — still 20×
+	// above the idle window, and only reachable when the retry hangs on a
+	// dead pooled socket.
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(25 * time.Second):
 		t.Fatal("retry after the idle abort did not complete: the pool handed the dead connection back")
 	}
 	if got := dials.Load(); got != 3 {
