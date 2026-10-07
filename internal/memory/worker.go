@@ -30,6 +30,12 @@ type Worker struct {
 	done       chan struct{}
 	wg         sync.WaitGroup
 	afterStore []AfterStoreHook
+
+	// mu guards closed and serializes Enqueue's send against Shutdown's
+	// close, so an after-tool callback that outlives tui.Run can never send
+	// into a closed channel.
+	mu     sync.Mutex
+	closed bool
 }
 
 // NewWorker creates a Worker with the given buffer size for the observation channel.
@@ -51,8 +57,22 @@ func (w *Worker) OnAfterStore(hook AfterStoreHook) {
 	w.afterStore = append(w.afterStore, hook)
 }
 
-// Enqueue sends a raw observation to the worker. Non-blocking: drops and logs if full.
+// Enqueue sends a raw observation to the worker. Non-blocking: drops and logs
+// if full. After Shutdown it drops with a warning instead of sending on the
+// closed channel — late after-tool callbacks may still fire.
 func (w *Worker) Enqueue(obs RawObservation) {
+	// The send happens under mu so that Shutdown cannot close obsChan
+	// between the closed check and the send; a send on a closed channel
+	// panics.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		slog.Warn("memory: worker shut down, dropping observation",
+			"tool", obs.ToolName,
+			"session", obs.SessionID,
+		)
+		return
+	}
 	select {
 	case w.obsChan <- obs:
 	default:
@@ -76,9 +96,17 @@ func (w *Worker) Start(ctx context.Context) {
 }
 
 // Shutdown closes the observation channel and waits for all pending
-// observations to be processed, with a timeout.
+// observations to be processed, with a timeout. Idempotent and safe to call
+// repeatedly (e.g. a retry after a drain timeout): the channel is closed at
+// most once, and every call waits for the drain, so a nil return always
+// means the queue is empty.
 func (w *Worker) Shutdown(ctx context.Context) error {
-	close(w.obsChan)
+	w.mu.Lock()
+	if !w.closed {
+		w.closed = true
+		close(w.obsChan)
+	}
+	w.mu.Unlock()
 
 	// Wait for drain or context timeout
 	select {
