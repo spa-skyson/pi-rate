@@ -256,7 +256,7 @@ func TestReadImageCallback_NonForwardingProviderIsNoOp(t *testing.T) {
 	sb := cogSandbox(t)
 	shot := cogWriteImage(t, sb, "shot.png")
 
-	for _, providerName := range []string{"ollama", "openai", "anthropic", ""} {
+	for _, providerName := range []string{"ollama", "mistral", ""} {
 		t.Run(providerName, func(t *testing.T) {
 			content := &genai.Content{
 				Role:  "user",
