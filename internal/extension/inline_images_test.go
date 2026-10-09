@@ -15,7 +15,7 @@ func TestProviderForwardsInlineImages(t *testing.T) {
 		}
 	}
 	for _, p := range []string{
-		"ollama", "azure", "mistral",
+		"ollama", "azure", "mistral", "codex",
 		"openrouter", "xai", "opencode", "agentgateway", "", "unknown",
 	} {
 		if providerForwardsInlineImages(p) {
