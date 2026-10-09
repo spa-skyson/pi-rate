@@ -69,33 +69,38 @@ func inlineImageTurn(t *testing.T, data []byte, mimeType string, withText bool) 
 	return &genai.Content{Role: "user", Parts: parts}
 }
 
-// TestGenaiInlineImages pins the shared extractor: images come out in order,
-// an empty MIME type falls back to image/png, non-image parts yield nothing,
-// and a MIME type the wire formats cannot carry is skipped rather than sent
-// to be rejected by the provider.
-func TestGenaiInlineImages(t *testing.T) {
+// TestGenaiTextImageSegmentsForwardableMIME pins the shared routing the
+// adapters actually run: images come out in their parts' positions, an empty
+// MIME type falls back to image/png, non-image parts ride as text (or not at
+// all), and a MIME type the wire formats cannot carry is skipped rather than
+// sent to be rejected by the provider.
+func TestGenaiTextImageSegmentsForwardableMIME(t *testing.T) {
 	data := pngOneByOne(t)
-	parts := []*genai.Part{
-		nil,
-		{Text: "not an image"},
-		{InlineData: &genai.Blob{Data: data, MIMEType: "image/jpeg"}},
-		{InlineData: &genai.Blob{}},
-		{InlineData: &genai.Blob{Data: data}},
-		{FunctionCall: &genai.FunctionCall{ID: "c", Name: "f"}},
-	}
-	images := genaiInlineImages(parts)
-	if len(images) != 2 {
-		t.Fatalf("got %d images, want 2", len(images))
-	}
-	if images[0].MIMEType != "image/jpeg" || string(images[0].Data) != string(data) {
-		t.Errorf("first image = {%q %d bytes}, want {image/jpeg %d bytes}", images[0].MIMEType, len(images[0].Data), len(data))
-	}
-	if images[1].MIMEType != "image/png" {
-		t.Errorf("empty MIME type = %q, want image/png fallback", images[1].MIMEType)
-	}
-	if len(genaiInlineImages(nil)) != 0 {
-		t.Error("nil parts must yield no images")
-	}
+
+	t.Run("images ride in position, empty MIME falls back to png", func(t *testing.T) {
+		parts := []*genai.Part{
+			nil,
+			{Text: "look:"},
+			{InlineData: &genai.Blob{Data: data, MIMEType: "image/jpeg"}},
+			{InlineData: &genai.Blob{Data: data}}, // empty MIME type
+		}
+		segments := genaiTextImageSegments(parts, true)
+		if len(segments) != 3 {
+			t.Fatalf("got %d segments, want 3 (text, jpeg image, png-fallback image)", len(segments))
+		}
+		if segments[0].text != "look:" {
+			t.Errorf("segment 0 = %q, want the caption text", segments[0].text)
+		}
+		if segments[1].image.MIMEType != "image/jpeg" || string(segments[1].image.Data) != string(data) {
+			t.Errorf("segment 1 = {%q %d bytes}, want {image/jpeg %d bytes}", segments[1].image.MIMEType, len(segments[1].image.Data), len(data))
+		}
+		if segments[2].image.MIMEType != "image/png" {
+			t.Errorf("empty MIME type = %q, want image/png fallback", segments[2].image.MIMEType)
+		}
+		if hasImages(genaiTextImageSegments(nil, true)) {
+			t.Error("nil parts must yield no images")
+		}
+	})
 
 	// The MIME whitelist: the four types the wire formats can carry pass,
 	// everything else — including the octet-stream a failed sniff leaves —
@@ -110,12 +115,29 @@ func TestGenaiInlineImages(t *testing.T) {
 			t.Errorf("forwardableImageMIME(%q) = true, want false", mime)
 		}
 	}
-	offList := genaiInlineImages([]*genai.Part{
-		{InlineData: &genai.Blob{Data: data, MIMEType: "application/octet-stream"}},
+
+	t.Run("off-list MIME is skipped between its neighbours", func(t *testing.T) {
+		// The skipped image must vanish without reordering what stays — the
+		// same shape an adapter receives for a BMP that sniffed its way past
+		// the image/* check. Captions on both sides stay in position with
+		// the forwardable png riding between them.
+		parts := []*genai.Part{
+			{Text: "A"},
+			{InlineData: &genai.Blob{Data: data, MIMEType: "application/octet-stream"}},
+			{InlineData: &genai.Blob{Data: data, MIMEType: "image/png"}},
+			{Text: "B"},
+		}
+		segments := genaiTextImageSegments(parts, true)
+		if len(segments) != 3 {
+			t.Fatalf("got %d segments, want A, png, B: %+v", len(segments), segments)
+		}
+		if segments[0].text != "A" || segments[2].text != "B" {
+			t.Errorf("captions = %q, %q; want A then B in their original positions", segments[0].text, segments[2].text)
+		}
+		if segments[1].image.MIMEType != "image/png" || string(segments[1].image.Data) != string(data) {
+			t.Errorf("image = {%q %d bytes}, want the png through untouched", segments[1].image.MIMEType, len(segments[1].image.Data))
+		}
 	})
-	if len(offList) != 0 {
-		t.Errorf("off-list MIME yielded %d images, want 0", len(offList))
-	}
 }
 
 // TestOaiContentsToMessagesInlineImage exercises the Chat Completions

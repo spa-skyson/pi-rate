@@ -36,23 +36,6 @@ func inlineImageOf(blob *genai.Blob) (genai.Blob, bool) {
 	return genai.Blob{Data: blob.Data, MIMEType: mimeType}, true
 }
 
-// genaiInlineImages returns the image payloads of an InlineData part, in the
-// order the parts appear. A part that is not an InlineData image — or one
-// whose MIME type the wire formats here cannot carry — yields nothing;
-// callers keep handling text and function calls as before.
-func genaiInlineImages(parts []*genai.Part) []genai.Blob {
-	var images []genai.Blob
-	for _, part := range parts {
-		if part == nil || part.InlineData == nil || len(part.InlineData.Data) == 0 {
-			continue
-		}
-		if image, ok := inlineImageOf(part.InlineData); ok {
-			images = append(images, image)
-		}
-	}
-	return images
-}
-
 // genaiTextImageSegments splits one content into the alternating text and
 // image segments its parts describe, preserving the order the parts appear.
 // Adjacent text parts coalesce into one segment — what separate parts said as
