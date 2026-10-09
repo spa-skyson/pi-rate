@@ -58,6 +58,58 @@ func genaiInlineImages(parts []*genai.Part) []genai.Blob {
 	return images
 }
 
+// genaiTextImageSegments splits one content into the alternating text and
+// image segments its parts describe, preserving the order the parts appear.
+// Adjacent text parts coalesce into one segment — what separate parts said as
+// one run keeps riding as one run — while each forwardable image becomes its
+// own segment, so a caption stays attached to the picture it captions:
+// [A, img1, B, img2] comes back as [A, img1, B, img2], not [A B, img1, img2].
+//
+// An InlineData part whose MIME type the wire cannot carry is skipped, and an
+// assistant turn yields no images at all: callers only route image-bearing
+// user turns here, and every wire drops — rather than reorders — an image it
+// cannot place.
+func genaiTextImageSegments(parts []*genai.Part, allowImages bool) []genaiBlobOrText {
+	if !allowImages {
+		return nil
+	}
+	var segments []genaiBlobOrText
+	for _, part := range parts {
+		switch {
+		case part == nil:
+		case part.Text != "":
+			n := len(segments) - 1
+			if n >= 0 && segments[n].text != "" {
+				segments[n].text += "\n" + part.Text
+			} else {
+				segments = append(segments, genaiBlobOrText{text: part.Text})
+			}
+		case part.InlineData != nil && len(part.InlineData.Data) > 0:
+			if image, ok := inlineImageOf(part.InlineData); ok {
+				segments = append(segments, genaiBlobOrText{image: image})
+			}
+		}
+	}
+	return segments
+}
+
+// genaiBlobOrText is one ordered segment of a turn: a caption-carrying text
+// run or an image blob, in the position its parts occupied.
+type genaiBlobOrText struct {
+	text  string
+	image genai.Blob
+}
+
+// hasImages reports whether any segment carries an image.
+func hasImages(segments []genaiBlobOrText) bool {
+	for _, s := range segments {
+		if s.image.Data != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // base64ImageDataURL renders image bytes as the data URL the Chat Completions
 // image_url content part accepts.
 func base64ImageDataURL(image genai.Blob) string {

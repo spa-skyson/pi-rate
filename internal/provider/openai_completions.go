@@ -140,19 +140,19 @@ func oaiContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 		}
 		role := strings.TrimSpace(content.Role)
 		textParts, functionCalls := genaiSplitParts(content.Parts)
-		images := genaiInlineImages(content.Parts)
+		segments := genaiTextImageSegments(content.Parts, true)
 
 		switch {
 		case len(functionCalls) > 0 && genaiIsAssistantRole(role):
 			signatures := genaiThoughtSignatures(content.Parts)
 			messages = append(messages, oaiToolCallMessages(textParts, functionCalls, functionResponses, signatures)...)
 		case len(textParts) > 0:
-			messages = append(messages, oaiTextOrImageMessage(role, strings.Join(textParts, "\n"), images))
-		case len(images) > 0:
+			messages = append(messages, oaiTextOrImageMessage(role, strings.Join(textParts, "\n"), segments))
+		case hasImages(segments):
 			// A turn of bare function results with an image appended and no
 			// text of its own: the textual result already rode home inside the
 			// tool message, the image still needs its own user message.
-			messages = append(messages, oaiTextOrImageMessage(role, "", images))
+			messages = append(messages, oaiTextOrImageMessage(role, "", segments))
 		}
 	}
 	return messages, systemInstruction
@@ -161,20 +161,25 @@ func oaiContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 // oaiTextOrImageMessage renders a turn as a user message. Without images it
 // is exactly what oaiTextMessage produced before images existed here, so
 // providers whose gate is off see no change on the wire. With images the
-// content becomes an array: text parts as text parts, images as image_url
-// parts carrying a base64 data URL. An InlineData part never becomes text.
-func oaiTextOrImageMessage(role, text string, images []genai.Blob) openai.ChatCompletionMessageParamUnion {
-	if len(images) == 0 || genaiIsAssistantRole(role) {
+// content becomes an array that walks the turn's parts in order: each text
+// run as a text part, each image as an image_url part carrying a base64 data
+// URL, so a caption stays next to the picture it captions. An InlineData part
+// never becomes text.
+func oaiTextOrImageMessage(role, text string, segments []genaiBlobOrText) openai.ChatCompletionMessageParamUnion {
+	if !hasImages(segments) || genaiIsAssistantRole(role) {
 		return oaiTextMessage(role, text)
 	}
-	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(images))
-	if text != "" {
-		parts = append(parts, openai.TextContentPart(text))
-	}
-	for _, image := range images {
-		parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
-			URL: base64ImageDataURL(image),
-		}))
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(segments))
+	for _, segment := range segments {
+		if segment.image.Data != nil {
+			parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+				URL: base64ImageDataURL(segment.image),
+			}))
+			continue
+		}
+		if segment.text != "" {
+			parts = append(parts, openai.TextContentPart(segment.text))
+		}
 	}
 	msg := openai.ChatCompletionUserMessageParam{
 		Role:    constant.User("user"),
