@@ -51,8 +51,9 @@ func inlineImageTurn(t *testing.T, data []byte, mimeType string, withText bool) 
 }
 
 // TestGenaiInlineImages pins the shared extractor: images come out in order,
-// an empty MIME type falls back to image/png, and non-image parts yield
-// nothing.
+// an empty MIME type falls back to image/png, non-image parts yield nothing,
+// and a MIME type the wire formats cannot carry is skipped rather than sent
+// to be rejected by the provider.
 func TestGenaiInlineImages(t *testing.T) {
 	data := pngOneByOne(t)
 	parts := []*genai.Part{
@@ -75,6 +76,26 @@ func TestGenaiInlineImages(t *testing.T) {
 	}
 	if len(genaiInlineImages(nil)) != 0 {
 		t.Error("nil parts must yield no images")
+	}
+
+	// The MIME whitelist: the four types the wire formats can carry pass,
+	// everything else — including the octet-stream a failed sniff leaves —
+	// is skipped instead of earning a 400 from the provider.
+	for _, mime := range []string{"image/png", "image/jpeg", "image/gif", "image/webp"} {
+		if !forwardableImageMIME(mime) {
+			t.Errorf("forwardableImageMIME(%q) = false, want true", mime)
+		}
+	}
+	for _, mime := range []string{"application/octet-stream", "image/tiff", "text/plain", "", "IMAGE/PNG"} {
+		if forwardableImageMIME(mime) {
+			t.Errorf("forwardableImageMIME(%q) = true, want false", mime)
+		}
+	}
+	offList := genaiInlineImages([]*genai.Part{
+		{InlineData: &genai.Blob{Data: data, MIMEType: "application/octet-stream"}},
+	})
+	if len(offList) != 0 {
+		t.Errorf("off-list MIME yielded %d images, want 0", len(offList))
 	}
 }
 
