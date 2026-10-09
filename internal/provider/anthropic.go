@@ -434,13 +434,16 @@ func antContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 // change on the wire. With images the content becomes an array of blocks:
 // the text as a text block, each image as a base64 image block. An InlineData
 // part never becomes text.
+//
+// The caller only hands an image-bearing turn here for a non-assistant role —
+// an assistant turn with a tool call routes to antToolUseMessages and one
+// without takes the textParts branch above — so the role below is always
+// user. The Messages API itself accepts images only in user turns anyway: an
+// image inside an assistant turn is dropped upstream and never reaches this
+// function (see the switch in antContentsToMessages).
 func antTextOrImageMessage(role, text string, images []genai.Blob) anthropic.MessageParam {
 	if len(images) == 0 || genaiIsAssistantRole(role) {
 		return antTextMessage(role, text)
-	}
-	msgRole := anthropic.MessageParamRoleUser
-	if genaiIsAssistantRole(role) {
-		msgRole = anthropic.MessageParamRoleAssistant
 	}
 	var blocks []anthropic.ContentBlockParamUnion
 	if text != "" {
@@ -450,7 +453,7 @@ func antTextOrImageMessage(role, text string, images []genai.Blob) anthropic.Mes
 		blocks = append(blocks, anthropic.NewImageBlockBase64(image.MIMEType, base64.StdEncoding.EncodeToString(image.Data)))
 	}
 	return anthropic.MessageParam{
-		Role:    msgRole,
+		Role:    anthropic.MessageParamRoleUser,
 		Content: blocks,
 	}
 }
