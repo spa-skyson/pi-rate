@@ -2,15 +2,20 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go/v3"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
 
@@ -331,21 +336,42 @@ func TestPairToolCallWithImageTurn(t *testing.T) {
 	})
 }
 
-// TestSharedConvertersKeepTheirWireWithoutGate pins the status quo for the
-// converter whose gate stays closed: the ollama conversion still drops an
-// InlineData part, and it never reaches its text.
-func TestSharedConvertersKeepTheirWireWithoutGate(t *testing.T) {
+// TestOllamaContentsToMessagesInlineImage pins the ollama conversion
+// (review finding A2): the image rides the message's Images field as raw
+// base64 — no data-URL prefix, no content array — while the text stays in
+// Content, and no image bytes ever leak into the text field.
+func TestOllamaContentsToMessagesInlineImage(t *testing.T) {
 	data := pngOneByOne(t)
-	b64Prefix := base64.StdEncoding.EncodeToString(data)[:20]
+	b64 := base64.StdEncoding.EncodeToString(data)
 
 	msgs, _ := ollamaContentsToMessages(
 		[]*genai.Content{inlineImageTurn(t, data, "image/png", true)}, nil)
-	raw, err := json.Marshal(msgs)
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	raw, err := json.Marshal(msgs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(raw, []byte("base64,")) || bytes.Contains(raw, []byte(b64Prefix)) {
-		t.Errorf("image data leaked into the ollama payload: %s", raw)
+	var wire struct {
+		Role    string   `json:"role"`
+		Content string   `json:"content"`
+		Images  []string `json:"images"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.Content != "what is on the screenshot?" {
+		t.Errorf("content = %q, want only the question text", wire.Content)
+	}
+	if len(wire.Images) != 1 {
+		t.Fatalf("images = %v, want exactly one raw-base64 entry: %s", wire.Images, raw)
+	}
+	if wire.Images[0] != b64 {
+		t.Errorf("images[0] = %q, want the raw base64 of the PNG bytes (no data-URL prefix)", wire.Images[0])
+	}
+	if !strings.HasPrefix(wire.Images[0], "iVBORw0KGgo") {
+		t.Errorf("images[0] does not start with the PNG base64 signature: %q", wire.Images[0])
 	}
 }
 
@@ -563,3 +589,92 @@ var (
 	_ = openai.ImageContentPart
 	_ = anthropic.NewImageBlockBase64
 )
+
+// mistralImageWireMessage is one Chat Completions message as it lands on the
+// wire: the content array's image parts carry image_url as an object with a
+// url member.
+type mistralImageWireMessage struct {
+	Role    string `json:"role"`
+	Content []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL struct {
+			URL string `json:"url"`
+		} `json:"image_url"`
+	} `json:"content"`
+}
+
+// TestMistralForwardsInlineImageOnWire pins review finding A1 end to end:
+// mistralModel rides oaiContentsToMessages, so an image-bearing turn must
+// reach Mistral's Chat Completions endpoint as a user message whose content
+// array carries the question text and an image_url part with a base64 data
+// URL — the form Mistral's vision models document for base64 images. The
+// mock server answers like Mistral does and records the request body.
+func TestMistralForwardsInlineImageOnWire(t *testing.T) {
+	data := pngOneByOne(t)
+
+	var captured json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := make([]byte, r.ContentLength)
+		_, _ = r.Body.Read(raw)
+		captured = json.RawMessage(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "chat-img", "object": "chat.completion", "model": "mistral-small-latest",
+			"choices": [{"index": 0, "message": {"role": "assistant", "content": "a cat"},
+				"finish_reason": "stop"}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+		}`))
+	}))
+	defer srv.Close()
+
+	m, err := NewMistral(context.Background(), "mistral-small-latest", "test-key", srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("NewMistral: %v", err)
+	}
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{inlineImageTurn(t, data, "image/png", true)},
+	}
+	for _, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent: %v", err)
+		}
+	}
+	if len(captured) == 0 {
+		t.Fatal("no request body captured")
+	}
+
+	// image_url arrives as an object ({\"url\": ...}) — the Chat Completions
+	// shape openai-go marshals.
+	var wire struct {
+		Messages []mistralImageWireMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(captured, &wire); err != nil {
+		t.Fatalf("decode request: %v\n%s", err, captured)
+	}
+	var user *mistralImageWireMessage
+	for i := range wire.Messages {
+		if wire.Messages[i].Role == "user" {
+			user = &wire.Messages[i]
+		}
+	}
+	if user == nil {
+		t.Fatalf("no user message in payload: %s", captured)
+	}
+	if len(user.Content) != 2 {
+		t.Fatalf("content has %d parts, want 2 (image_url + text): %s", len(user.Content), captured)
+	}
+	// The fixture orders the image before the trailing question; the payload
+	// must keep that order (see TestInterleavedTextAndImageOrder).
+	if user.Content[0].Type != "image_url" {
+		t.Fatalf("first part = %+v, want type image_url", user.Content[0])
+	}
+	wantURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
+	if user.Content[0].ImageURL.URL != wantURL {
+		t.Errorf("image_url.url = %q, want the PNG data URL", user.Content[0].ImageURL.URL)
+	}
+	if user.Content[1].Type != "text" || user.Content[1].Text != "what is on the screenshot?" {
+		t.Errorf("second part = %+v, want the question text", user.Content[1])
+	}
+}

@@ -251,12 +251,14 @@ func TestReadImageCallback_TrailingContentWithoutImages(t *testing.T) {
 // TestReadImageCallback_NonForwardingProviderIsNoOp pins that a provider whose
 // adapter drops InlineData gets a callback that does no work at all. Reading
 // the bytes there costs the disk I/O and buys nothing, because the parts are
-// discarded before the request goes out.
+// discarded before the request goes out. ollama and mistral used to sit on
+// this list; both adapters forward images now, so the closed gate remains
+// for azure and the unknown-provider case.
 func TestReadImageCallback_NonForwardingProviderIsNoOp(t *testing.T) {
 	sb := cogSandbox(t)
 	shot := cogWriteImage(t, sb, "shot.png")
 
-	for _, providerName := range []string{"ollama", "mistral", ""} {
+	for _, providerName := range []string{"azure", "xai", ""} {
 		t.Run(providerName, func(t *testing.T) {
 			content := &genai.Content{
 				Role:  "user",
