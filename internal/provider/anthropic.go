@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -283,13 +284,44 @@ func convertRoleToBeta(role anthropic.MessageParamRole) anthropic.BetaMessagePar
 	}
 }
 
-// convertContentBlockToBeta converts ContentBlockParamUnion to BetaContentBlockParamUnion.
+// convertContentBlockToBeta converts ContentBlockParamUnion to
+// BetaContentBlockParamUnion. The advisor surface reads the same message
+// array the standard path built, so every block type that path can produce
+// has to survive the trip: text, images, tool_use and tool_result. The Go
+// types differ only in their wrapper structs — the JSON each side marshals
+// is identical — so each conversion is a field copy. A block type nothing
+// produces today still falls through, but now as a dropped block rather than
+// an empty text block: an empty text payload is a protocol-visible forgery.
 func convertContentBlockToBeta(c anthropic.ContentBlockParamUnion) anthropic.BetaContentBlockParamUnion {
-	if c.OfText != nil {
+	switch {
+	case c.OfText != nil:
 		return anthropic.NewBetaTextBlock(c.OfText.Text)
+	case c.OfImage != nil && c.OfImage.Source.OfBase64 != nil:
+		src := c.OfImage.Source.OfBase64
+		return anthropic.NewBetaImageBlock(anthropic.BetaBase64ImageSourceParam{
+			Data:      src.Data,
+			MediaType: anthropic.BetaBase64ImageSourceMediaType(src.MediaType),
+		})
+	case c.OfToolUse != nil:
+		return anthropic.NewBetaToolUseBlock(c.OfToolUse.ID, c.OfToolUse.Input, c.OfToolUse.Name)
+	case c.OfToolResult != nil:
+		beta := anthropic.BetaToolResultBlockParam{
+			ToolUseID: c.OfToolResult.ToolUseID,
+			IsError:   c.OfToolResult.IsError,
+		}
+		if c.OfToolResult.CacheControl.Type != "" {
+			beta.CacheControl = anthropic.BetaCacheControlEphemeralParam{Type: c.OfToolResult.CacheControl.Type}
+		}
+		for _, content := range c.OfToolResult.Content {
+			if content.OfText != nil {
+				beta.Content = append(beta.Content, anthropic.BetaToolResultBlockParamContentUnion{
+					OfText: &anthropic.BetaTextBlockParam{Text: content.OfText.Text},
+				})
+			}
+		}
+		return anthropic.BetaContentBlockParamUnion{OfToolResult: &beta}
 	}
-	// For other types, return empty - they need specialized conversion
-	return anthropic.NewBetaTextBlock("")
+	return anthropic.BetaContentBlockParamUnion{}
 }
 
 // antToolSchema is one genai function declaration reduced to the fields both
@@ -399,12 +431,18 @@ func antContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 		}
 
 		textParts, functionCalls := genaiSplitParts(content.Parts)
+		segments := genaiTextImageSegments(content.Parts, true)
 
 		switch {
 		case len(functionCalls) > 0 && genaiIsAssistantRole(role):
 			messages = append(messages, antToolUseMessages(textParts, functionCalls, functionResponses)...)
 		case len(textParts) > 0:
-			messages = append(messages, antTextMessage(role, strings.Join(textParts, "\n")))
+			messages = append(messages, antTextOrImageMessage(role, strings.Join(textParts, "\n"), segments))
+		case hasImages(segments):
+			// A turn of bare function results with an image appended and no
+			// text of its own: the textual result already rode home inside the
+			// tool_result block, the image still needs its own message.
+			messages = append(messages, antTextOrImageMessage(role, "", segments))
 		}
 	}
 
@@ -419,6 +457,40 @@ func antContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 	}
 
 	return messages, systemPrompt
+}
+
+// antTextOrImageMessage renders a turn as a message under the Anthropic role
+// its genai role maps to. Without images it is exactly what antTextMessage
+// produced before images existed here, so providers whose gate is off see no
+// change on the wire. With images the content becomes an array of blocks
+// that walks the turn's parts in order: each text run as a text block, each
+// image as a base64 image block, so a caption stays next to the picture it
+// captions. An InlineData part never becomes text.
+//
+// The caller only hands an image-bearing turn here for a non-assistant role —
+// an assistant turn with a tool call routes to antToolUseMessages and one
+// without takes the textParts branch above — so the role below is always
+// user. The Messages API itself accepts images only in user turns anyway: an
+// image inside an assistant turn is dropped upstream and never reaches this
+// function (see the switch in antContentsToMessages).
+func antTextOrImageMessage(role, text string, segments []genaiBlobOrText) anthropic.MessageParam {
+	if !hasImages(segments) || genaiIsAssistantRole(role) {
+		return antTextMessage(role, text)
+	}
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(segments))
+	for _, segment := range segments {
+		if segment.image.Data != nil {
+			blocks = append(blocks, anthropic.NewImageBlockBase64(segment.image.MIMEType, base64.StdEncoding.EncodeToString(segment.image.Data)))
+			continue
+		}
+		if segment.text != "" {
+			blocks = append(blocks, anthropic.NewTextBlock(segment.text))
+		}
+	}
+	return anthropic.MessageParam{
+		Role:    anthropic.MessageParamRoleUser,
+		Content: blocks,
+	}
 }
 
 // antToolUseMessages renders one assistant turn that called tools as the pair

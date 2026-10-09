@@ -327,21 +327,48 @@ func addTrimmedID(set map[string]struct{}, id string) {
 
 // oaiAppendResponsesItems appends the input items for one content to items.
 // Consecutive text parts coalesce into a single message, which is flushed
-// before each function call or output so the items keep their original order.
-// Function calls and outputs whose counterpart is missing are dropped.
+// before each image part, function call or output so the items keep their
+// original order. Function calls and outputs whose counterpart is missing
+// are dropped.
 func oaiAppendResponsesItems(
 	items responses.ResponseInputParam,
 	content *genai.Content,
 	callIDs, responseIDs map[string]struct{},
 ) responses.ResponseInputParam {
 	role := oaiResponsesRole(content.Role)
-	var textParts []string
+	var segments []genaiBlobOrText
 	flushText := func() {
-		if len(textParts) == 0 {
+		if len(segments) == 0 {
 			return
 		}
-		items = append(items, responses.ResponseInputItemParamOfMessage(strings.Join(textParts, "\n"), role))
-		textParts = nil
+		if len(segments) == 1 && segments[0].image.Data == nil {
+			// The plain message every caller produced before images
+			// existed here; keep that exact wire shape for text-only turns.
+			items = append(items, responses.ResponseInputItemParamOfMessage(segments[0].text, role))
+			segments = nil
+			return
+		}
+		contentList := make(responses.ResponseInputMessageContentListParam, 0, len(segments))
+		for _, segment := range segments {
+			if segment.image.Data != nil {
+				contentList = append(contentList, responses.ResponseInputContentUnionParam{
+					OfInputImage: &responses.ResponseInputImageParam{
+						// The Responses API takes a data URL here, the same
+						// base64 payload the Chat Completions image_url part
+						// carries. Detail stays unset: the API defaults it
+						// to auto, and the callers here have no basis to pick
+						// otherwise.
+						ImageURL: param.NewOpt(base64ImageDataURL(segment.image)),
+					},
+				})
+				continue
+			}
+			if segment.text != "" {
+				contentList = append(contentList, responses.ResponseInputContentParamOfInputText(segment.text))
+			}
+		}
+		items = append(items, responses.ResponseInputItemParamOfMessage(contentList, role))
+		segments = nil
 	}
 
 	for _, part := range content.Parts {
@@ -350,7 +377,25 @@ func oaiAppendResponsesItems(
 		}
 		switch {
 		case part.Text != "":
-			textParts = append(textParts, part.Text)
+			n := len(segments) - 1
+			if n >= 0 && segments[n].image.Data == nil {
+				segments[n].text += "\n" + part.Text
+			} else {
+				segments = append(segments, genaiBlobOrText{text: part.Text})
+			}
+		case part.InlineData != nil && len(part.InlineData.Data) > 0:
+			// Flush the text run first so the image takes its own position;
+			// the content list walks the parts in order. An assistant turn
+			// drops the image without touching its text — the Responses API
+			// replay of a model turn is text and function calls, so the
+			// wire stays byte-identical to what this path sent before it
+			// learned images.
+			if !genaiIsAssistantRole(content.Role) {
+				flushText()
+				if image, ok := inlineImageOf(part.InlineData); ok {
+					segments = append(segments, genaiBlobOrText{image: image})
+				}
+			}
 		case part.FunctionCall != nil:
 			flushText()
 			fc := part.FunctionCall

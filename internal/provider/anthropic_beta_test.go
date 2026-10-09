@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -93,7 +94,10 @@ func TestConvertRoleToBeta(t *testing.T) {
 }
 
 // TestConvertContentBlockToBeta verifies the text-block passthrough and the
-// non-text fallback (which returns an empty text block).
+// conversions of every block type the standard path can produce. The advisor
+// surface reads the same message array the standard path built, so an
+// unconverted block type would either vanish or degrade into an empty text
+// payload on the beta wire.
 func TestConvertContentBlockToBeta(t *testing.T) {
 	t.Run("text block round-trips text", func(t *testing.T) {
 		src := anthropic.NewTextBlock("hello world")
@@ -106,17 +110,118 @@ func TestConvertContentBlockToBeta(t *testing.T) {
 		}
 	})
 
-	t.Run("non-text fallback returns empty text block", func(t *testing.T) {
-		// A tool-use block has no OfText, so the fallback path is taken.
-		src := anthropic.NewToolUseBlock("tu_id", map[string]any{"x": 1}, "tool_name")
+	t.Run("image block round-trips base64 source", func(t *testing.T) {
+		src := anthropic.NewImageBlockBase64("image/png", "cG5nLWJ5dGVz")
 		got := convertContentBlockToBeta(src)
-		if got.OfText == nil {
-			t.Fatal("expected fallback to produce a text block")
+		if got.OfImage == nil {
+			t.Fatalf("expected OfImage to be set, got %+v", got)
 		}
-		if got.OfText.Text != "" {
-			t.Errorf("fallback text = %q, want empty", got.OfText.Text)
+		b64 := got.OfImage.Source.OfBase64
+		if b64 == nil {
+			t.Fatal("expected the base64 source variant")
+		}
+		if b64.MediaType != anthropic.BetaBase64ImageSourceMediaTypeImagePNG {
+			t.Errorf("media type = %q, want image/png", b64.MediaType)
+		}
+		if b64.Data != "cG5nLWJ5dGVz" {
+			t.Errorf("data = %q, want the original bytes", b64.Data)
 		}
 	})
+
+	t.Run("tool_use block round-trips id, name, input", func(t *testing.T) {
+		src := anthropic.NewToolUseBlock("tu_id", map[string]any{"x": 1}, "tool_name")
+		got := convertContentBlockToBeta(src)
+		if got.OfToolUse == nil {
+			t.Fatalf("expected OfToolUse to be set, got %+v", got)
+		}
+		if got.OfToolUse.ID != "tu_id" || got.OfToolUse.Name != "tool_name" {
+			t.Errorf("id/name = %q/%q, want tu_id/tool_name", got.OfToolUse.ID, got.OfToolUse.Name)
+		}
+		input, ok := got.OfToolUse.Input.(map[string]any)
+		if !ok || input["x"] != 1 {
+			t.Errorf("input = %v, want the original argument map", got.OfToolUse.Input)
+		}
+	})
+
+	t.Run("tool_result block round-trips tool_use_id and text", func(t *testing.T) {
+		src := anthropic.NewToolResultBlock("tu_id", "the result", true)
+		got := convertContentBlockToBeta(src)
+		if got.OfToolResult == nil {
+			t.Fatalf("expected OfToolResult to be set, got %+v", got)
+		}
+		if got.OfToolResult.ToolUseID != "tu_id" {
+			t.Errorf("tool_use_id = %q, want tu_id", got.OfToolResult.ToolUseID)
+		}
+		if got.OfToolResult.IsError.Or(false) != true {
+			t.Errorf("is_error = %v, want true", got.OfToolResult.IsError)
+		}
+		if len(got.OfToolResult.Content) != 1 || got.OfToolResult.Content[0].OfText == nil ||
+			got.OfToolResult.Content[0].OfText.Text != "the result" {
+			t.Errorf("content = %+v, want one text block", got.OfToolResult.Content)
+		}
+	})
+
+	t.Run("unknown block drops instead of forging an empty text payload", func(t *testing.T) {
+		got := convertContentBlockToBeta(anthropic.ContentBlockParamUnion{})
+		if got.OfText != nil {
+			t.Errorf("empty union produced a text block with %q", got.OfText.Text)
+		}
+		if got.OfImage != nil || got.OfToolUse != nil || got.OfToolResult != nil {
+			t.Errorf("empty union produced a block: %+v", got)
+		}
+	})
+}
+
+// TestBuildBetaParamsCarriesImageBlock pins review finding R2 on the
+// serialized advisor payload: a user turn carrying an image must reach the
+// beta wire as an image block with the same base64 source the standard path
+// would send — not as an empty text block, and not dropped.
+func TestBuildBetaParamsCarriesImageBlock(t *testing.T) {
+	data := pngOneByOne(t)
+	m := &anthropicModel{advisorModel: "claude-opus-4-7"}
+	messages, _ := antContentsToMessages([]*genai.Content{
+		{Role: "user", Parts: []*genai.Part{
+			{Text: "what is on the screenshot?"},
+			{InlineData: &genai.Blob{Data: data, MIMEType: "image/png"}},
+		}},
+	}, nil)
+
+	params := m.buildBetaParams("claude-sonnet-4-6", messages, "", 8192, nil, nil)
+	if len(params.Messages) != 1 {
+		t.Fatalf("expected 1 beta message, got %d", len(params.Messages))
+	}
+	content := params.Messages[0].Content
+	if len(content) != 2 {
+		t.Fatalf("expected 2 blocks (text + image), got %d", len(content))
+	}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire []struct {
+		Type   string `json:"type"`
+		Text   string `json:"text"`
+		Source struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire[0].Type != "text" || wire[0].Text != "what is on the screenshot?" {
+		t.Errorf("first block = %+v, want the question text", wire[0])
+	}
+	if wire[1].Type != "image" {
+		t.Fatalf("second block = %+v, want type image", wire[1])
+	}
+	if wire[1].Source.Type != "base64" || wire[1].Source.MediaType != "image/png" {
+		t.Fatalf("image source = %+v, want base64/image/png", wire[1].Source)
+	}
+	if wire[1].Source.Data != base64.StdEncoding.EncodeToString(data) {
+		t.Error("image source data does not match the PNG bytes")
+	}
 }
 
 // TestAntGenaiToolsToBetaAnthropic verifies the beta tool conversion handles

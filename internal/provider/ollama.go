@@ -441,12 +441,18 @@ func ollamaContentsToMessages(contents []*genai.Content, config *genai.GenerateC
 		}
 
 		textParts, functionCalls := genaiSplitParts(content.Parts)
+		segments := genaiTextImageSegments(content.Parts, !genaiIsAssistantRole(role))
 
 		switch {
 		case len(functionCalls) > 0 && genaiIsAssistantRole(role):
 			messages = append(messages, ollamaToolCallMessages(textParts, functionCalls, functionResponses)...)
 		case len(textParts) > 0:
-			messages = append(messages, ollamaTextMessage(role, strings.Join(textParts, "\n")))
+			messages = append(messages, ollamaTextOrImageMessage(role, strings.Join(textParts, "\n"), segments))
+		case hasImages(segments):
+			// A turn of bare function results with an image appended and no
+			// text of its own: the textual result already rode home inside
+			// the tool message, the image still needs its own user message.
+			messages = append(messages, ollamaTextOrImageMessage(role, "", segments))
 		}
 	}
 
@@ -521,6 +527,25 @@ func ollamaTextMessage(role, text string) ollamaapi.Message {
 		Role:    msgRole,
 		Content: text,
 	}
+}
+
+// ollamaTextOrImageMessage renders a turn as an Ollama chat message. Without
+// images it is exactly what ollamaTextMessage produced before images existed
+// here, so providers whose gate is off see no change on the wire. With
+// images the text stays in the message's Content — Ollama has no content
+// array — and each image rides the message's Images field as raw bytes: the
+// API marshals ImageData as base64 without a data-URL prefix. The segments
+// come in part order, but an ordered message cannot express interleaving —
+// Ollama attaches the whole image set to the whole text — so the text runs
+// are joined where they stood. An InlineData part never becomes text.
+func ollamaTextOrImageMessage(role, text string, segments []genaiBlobOrText) ollamaapi.Message {
+	msg := ollamaTextMessage(role, text)
+	for _, segment := range segments {
+		if segment.image.Data != nil {
+			msg.Images = append(msg.Images, ollamaapi.ImageData(segment.image.Data))
+		}
+	}
+	return msg
 }
 
 // ollamaGenaiToolsToOllama converts genai tools to Ollama native tool format.
