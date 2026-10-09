@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -399,12 +400,18 @@ func antContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 		}
 
 		textParts, functionCalls := genaiSplitParts(content.Parts)
+		images := genaiInlineImages(content.Parts)
 
 		switch {
 		case len(functionCalls) > 0 && genaiIsAssistantRole(role):
 			messages = append(messages, antToolUseMessages(textParts, functionCalls, functionResponses)...)
 		case len(textParts) > 0:
-			messages = append(messages, antTextMessage(role, strings.Join(textParts, "\n")))
+			messages = append(messages, antTextOrImageMessage(role, strings.Join(textParts, "\n"), images))
+		case len(images) > 0:
+			// A turn of bare function results with an image appended and no
+			// text of its own: the textual result already rode home inside the
+			// tool_result block, the image still needs its own message.
+			messages = append(messages, antTextOrImageMessage(role, "", images))
 		}
 	}
 
@@ -419,6 +426,33 @@ func antContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 	}
 
 	return messages, systemPrompt
+}
+
+// antTextOrImageMessage renders a turn as a message under the Anthropic role
+// its genai role maps to. Without images it is exactly what antTextMessage
+// produced before images existed here, so providers whose gate is off see no
+// change on the wire. With images the content becomes an array of blocks:
+// the text as a text block, each image as a base64 image block. An InlineData
+// part never becomes text.
+func antTextOrImageMessage(role, text string, images []genai.Blob) anthropic.MessageParam {
+	if len(images) == 0 || genaiIsAssistantRole(role) {
+		return antTextMessage(role, text)
+	}
+	msgRole := anthropic.MessageParamRoleUser
+	if genaiIsAssistantRole(role) {
+		msgRole = anthropic.MessageParamRoleAssistant
+	}
+	var blocks []anthropic.ContentBlockParamUnion
+	if text != "" {
+		blocks = append(blocks, anthropic.NewTextBlock(text))
+	}
+	for _, image := range images {
+		blocks = append(blocks, anthropic.NewImageBlockBase64(image.MIMEType, base64.StdEncoding.EncodeToString(image.Data)))
+	}
+	return anthropic.MessageParam{
+		Role:    msgRole,
+		Content: blocks,
+	}
 }
 
 // antToolUseMessages renders one assistant turn that called tools as the pair
