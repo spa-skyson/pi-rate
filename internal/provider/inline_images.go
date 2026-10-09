@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"google.golang.org/genai"
+
+	"github.com/spa-skyson/pi-rate/internal/tools"
 )
 
 // fallbackImageMIMEType is the MIME type assumed for an InlineData part whose
@@ -12,19 +14,12 @@ import (
 const fallbackImageMIMEType = "image/png"
 
 // forwardableImageMIME reports whether a MIME type is one the image-bearing
-// wire formats here accept. Every adapter in this package can only express
-// image/png, image/jpeg, image/gif and image/webp — the Anthropic base64
-// source spells the media types out, and the OpenAI image_url endpoint
-// rejects the rest — so anything else is skipped rather than sent to be
-// rejected: the read_image tool only produces image/* types, so an off-list
-// MIME here means the sniff could not name the format, and a 400 from the
-// provider would abort the whole turn for bytes the model cannot see anyway.
+// wire formats here accept. The set lives in internal/tools (see
+// tools.ForwardableImageMIME) because the read_image injector in
+// internal/extension must skip the same images this package skips — one
+// answer, three consumers: the tool, the injector, and these adapters.
 func forwardableImageMIME(mimeType string) bool {
-	switch mimeType {
-	case "image/png", "image/jpeg", "image/gif", "image/webp":
-		return true
-	}
-	return false
+	return tools.ForwardableImageMIME(mimeType)
 }
 
 // inlineImageOf reduces one InlineData part to the image blob the adapters
