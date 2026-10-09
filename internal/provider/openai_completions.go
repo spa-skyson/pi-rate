@@ -140,16 +140,47 @@ func oaiContentsToMessages(contents []*genai.Content, config *genai.GenerateCont
 		}
 		role := strings.TrimSpace(content.Role)
 		textParts, functionCalls := genaiSplitParts(content.Parts)
+		images := genaiInlineImages(content.Parts)
 
 		switch {
 		case len(functionCalls) > 0 && genaiIsAssistantRole(role):
 			signatures := genaiThoughtSignatures(content.Parts)
 			messages = append(messages, oaiToolCallMessages(textParts, functionCalls, functionResponses, signatures)...)
 		case len(textParts) > 0:
-			messages = append(messages, oaiTextMessage(role, strings.Join(textParts, "\n")))
+			messages = append(messages, oaiTextOrImageMessage(role, strings.Join(textParts, "\n"), images))
+		case len(images) > 0:
+			// A turn of bare function results with an image appended and no
+			// text of its own: the textual result already rode home inside the
+			// tool message, the image still needs its own user message.
+			messages = append(messages, oaiTextOrImageMessage(role, "", images))
 		}
 	}
 	return messages, systemInstruction
+}
+
+// oaiTextOrImageMessage renders a turn as a user message. Without images it
+// is exactly what oaiTextMessage produced before images existed here, so
+// providers whose gate is off see no change on the wire. With images the
+// content becomes an array: text parts as text parts, images as image_url
+// parts carrying a base64 data URL. An InlineData part never becomes text.
+func oaiTextOrImageMessage(role, text string, images []genai.Blob) openai.ChatCompletionMessageParamUnion {
+	if len(images) == 0 || genaiIsAssistantRole(role) {
+		return oaiTextMessage(role, text)
+	}
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(images))
+	if text != "" {
+		parts = append(parts, openai.TextContentPart(text))
+	}
+	for _, image := range images {
+		parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+			URL: base64ImageDataURL(image),
+		}))
+	}
+	msg := openai.ChatCompletionUserMessageParam{
+		Role:    constant.User("user"),
+		Content: openai.ChatCompletionUserMessageParamContentUnion{OfArrayOfContentParts: parts},
+	}
+	return openai.ChatCompletionMessageParamUnion{OfUser: &msg}
 }
 
 // oaiToolCallMessages renders one assistant turn that called tools: the
