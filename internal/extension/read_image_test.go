@@ -227,11 +227,12 @@ func TestReadImagePartsForwardableMIME(t *testing.T) {
 		path := filepath.Join(sb.Dir(), "shot.bmp")
 		// "BM" + byte-sized header fields: enough for http.DetectContentType
 		// to name image/bmp, which is the exact case the warning exists for.
-		if err := sb.WriteFile(path, append([]byte("BM"), make([]byte, 26)...), 0o644); err != nil {
-			t.Fatalf("write bmp: %v", err)
-		}
-		if got := tools.DetectImageMIMEType([]byte(append([]byte("BM"), make([]byte, 26)...))); got != "image/bmp" {
+		bmp := append([]byte("BM"), make([]byte, 26)...)
+		if got := tools.DetectImageMIMEType(bmp); got != "image/bmp" {
 			t.Fatalf("precondition failed: fixture sniffs as %q, want image/bmp", got)
+		}
+		if err := sb.WriteFile(path, bmp, 0o644); err != nil {
+			t.Fatalf("write bmp: %v", err)
 		}
 
 		var notices []string

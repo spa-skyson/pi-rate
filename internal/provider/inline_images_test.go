@@ -116,7 +116,7 @@ func TestGenaiTextImageSegmentsForwardableMIME(t *testing.T) {
 		}
 	}
 
-	t.Run("off-list MIME is skipped between its neighbours", func(t *testing.T) {
+	t.Run("off-list MIME is skipped between its neighbors", func(t *testing.T) {
 		// The skipped image must vanish without reordering what stays — the
 		// same shape an adapter receives for a BMP that sniffed its way past
 		// the image/* check. Captions on both sides stay in position with
