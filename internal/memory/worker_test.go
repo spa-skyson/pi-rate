@@ -538,3 +538,157 @@ func TestTruncateFallbackTextMarshalError(t *testing.T) {
 		t.Fatalf("text = %q", text)
 	}
 }
+
+// TestWorkerEnqueueAfterShutdownClosedChannel pins the production panic from
+// the after-tool callback: Enqueue must drop the observation instead of
+// sending on the closed obsChan.
+func TestWorkerEnqueueAfterShutdownClosedChannel(t *testing.T) {
+	store := newMockStore()
+	comp := newMockCompressor()
+	w := NewWorker(store, comp, 10)
+
+	ctx := context.Background()
+	w.Start(ctx)
+	w.Enqueue(makeRaw("tool-before-shutdown"))
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := w.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	// A late after-tool callback fires after the channel is closed.
+	w.Enqueue(makeRaw("tool-after-shutdown"))
+
+	obs := store.getObservations()
+	if len(obs) != 1 {
+		t.Fatalf("stored observations = %d, want 1 (late enqueue must be dropped)", len(obs))
+	}
+	if obs[0].ToolName != "tool-before-shutdown" {
+		t.Errorf("obs[0].ToolName = %q, want %q", obs[0].ToolName, "tool-before-shutdown")
+	}
+}
+
+// TestWorkerShutdownIdempotent pins the "close of closed channel" panic on a
+// second Shutdown. The case the fix targets is a retry after a drain timeout:
+// the first Shutdown returns an error while the consumer is still working, so
+// the caller retries — the channel is already closed, and the retried call
+// must wait out the in-flight drain instead of panicking or returning early.
+func TestWorkerShutdownIdempotent(t *testing.T) {
+	t.Run("repeat after successful drain", func(t *testing.T) {
+		store := newMockStore()
+		comp := newMockCompressor()
+		w := NewWorker(store, comp, 10)
+
+		ctx := context.Background()
+		w.Start(ctx)
+		w.Enqueue(makeRaw("tool-1"))
+
+		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := w.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("first shutdown: %v", err)
+		}
+		if err := w.Shutdown(shutdownCtx); err != nil {
+			t.Fatalf("second shutdown: %v", err)
+		}
+
+		if obs := store.getObservations(); len(obs) != 1 {
+			t.Errorf("stored observations = %d, want 1", len(obs))
+		}
+	})
+
+	t.Run("retry after drain timeout", func(t *testing.T) {
+		store := newMockStore()
+		// Slow compressor so the first Shutdown times out mid-drain while the
+		// consumer is still working through the queue.
+		comp := &mockCompressor{failAt: -1, latency: 100 * time.Millisecond}
+		w := NewWorker(store, comp, 10)
+
+		ctx := context.Background()
+		w.Start(ctx)
+
+		const want = 5
+		for i := 0; i < want; i++ {
+			w.Enqueue(makeRaw(fmt.Sprintf("slow-%d", i)))
+		}
+
+		// The drain needs 5 * 100ms; a 10ms context fires well before it
+		// finishes. The channel is now closed and the consumer is still busy.
+		shortCtx, shortCancel := context.WithTimeout(ctx, 10*time.Millisecond)
+		if err := w.Shutdown(shortCtx); err == nil {
+			t.Error("first shutdown: expected timeout error, got nil")
+		}
+		shortCancel()
+
+		// The retry must not panic on the closed channel and must wait for
+		// the drain left running by the timed-out call.
+		longCtx, longCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer longCancel()
+		if err := w.Shutdown(longCtx); err != nil {
+			t.Fatalf("second shutdown: %v", err)
+		}
+
+		if obs := store.getObservations(); len(obs) != want {
+			t.Errorf("stored observations = %d, want %d (queue must drain fully)",
+				len(obs), want)
+		}
+	})
+}
+
+// TestWorkerEnqueueShutdownRace hammers Enqueue and Shutdown from many
+// goroutines: no send on a closed channel and no race between the close and
+// an in-flight enqueue. Under the old code this panics or trips the race
+// detector.
+//
+// A start gate keeps the enqueuers from racing the Shutdown goroutine to the
+// scheduler: every sender is up and spinning before Shutdown can close the
+// channel, so the close lands in the middle of the send storm instead of
+// before it — the enqueue-vs-close window is the one the production panic
+// needed. The final send after Shutdown returns pins the late-callback drop
+// path under the same concurrency.
+func TestWorkerEnqueueShutdownRace(t *testing.T) {
+	store := newMockStore()
+	comp := newMockCompressor()
+	w := NewWorker(store, comp, 64)
+
+	ctx := context.Background()
+	w.Start(ctx)
+
+	const (
+		enqueuers = 8
+		perWorker = 100
+	)
+	start := make(chan struct{})
+	shutdownReturned := make(chan struct{})
+
+	var wg sync.WaitGroup
+	for i := 0; i < enqueuers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < perWorker; j++ {
+				w.Enqueue(makeRaw(fmt.Sprintf("race-tool-%d-%d", i, j)))
+			}
+			// Shutdown has returned and the channel is closed; this send
+			// must be dropped, not panic.
+			<-shutdownReturned
+			w.Enqueue(makeRaw(fmt.Sprintf("race-tool-late-%d", i)))
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		if err := w.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		close(shutdownReturned)
+	}()
+
+	// Release the gate: senders and Shutdown start at the same moment, so
+	// sends are in flight while the channel closes and drains.
+	close(start)
+	wg.Wait()
+}
