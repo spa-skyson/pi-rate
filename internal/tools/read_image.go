@@ -21,10 +21,15 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
-// maxImageBytes caps the size of an image read_image will accept. Screenshots
+// MaxImageBytes caps the size of an image read_image will accept. Screenshots
 // are typically well under this; the cap prevents an oversized or malicious
-// file from consuming unbounded vision-context tokens when injected.
-const maxImageBytes = 20 * 1024 * 1024 // 20 MB
+// file from consuming unbounded vision-context tokens when injected. The
+// read_image injector (internal/extension) re-applies the same cap to the
+// bytes it re-reads per step, so both entry points enforce one limit.
+const MaxImageBytes = 20 * 1024 * 1024 // 20 MB
+
+// maxImageBytes is the package-internal spelling the tool's own checks use.
+const maxImageBytes = MaxImageBytes
 
 // imageFetchTimeout bounds the total time spent fetching a remote image. Most
 // legitimate image hosts respond in well under this; anything slower is almost

@@ -2,7 +2,9 @@ package extension
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
+	"strings"
 	"sync"
 
 	"google.golang.org/adk/v2/agent"
@@ -96,8 +98,15 @@ func latestReadImageContent(contents []*genai.Content) *genai.Content {
 
 // readImageParts reads the file behind every read_image FunctionResponse in
 // parts and returns the inline image parts to append, in the order the
-// responses appear. A file that cannot be read is skipped — the textual path
-// result still stands on its own.
+// responses appear. A file that cannot be read — or whose bytes fail the
+// same size and MIME checks the tool applied when it accepted the file — is
+// skipped, and the textual path result still stands on its own.
+//
+// The re-check is not paranoia about the tool: this callback re-reads the
+// file on every agentic step, long after the tool's own checks ran. A file
+// that has grown past the cap, or been replaced by something that no longer
+// sniffs as an image, would otherwise ride into the prompt as raw context on
+// every step. The tool's limit is the same constant, not a second number.
 func (in *readImageInjector) readImageParts(parts []*genai.Part) []*genai.Part {
 	var out []*genai.Part
 	for _, part := range parts {
@@ -110,7 +119,15 @@ func (in *readImageInjector) readImageParts(parts []*genai.Part) []*genai.Part {
 			in.warn(path, err)
 			continue
 		}
-		out = append(out, genai.NewPartFromBytes(data, detectImageMIMEType(data, path)))
+		mimeType := detectImageMIMEType(data, path)
+		switch {
+		case int64(len(data)) > tools.MaxImageBytes:
+			in.warn(path, fmt.Errorf("%d bytes exceeds the %d byte image limit", len(data), tools.MaxImageBytes))
+		case !strings.HasPrefix(mimeType, "image/"):
+			in.warn(path, fmt.Errorf("no longer sniffs as an image (detected %q)", mimeType))
+		default:
+			out = append(out, genai.NewPartFromBytes(data, mimeType))
+		}
 	}
 	return out
 }
