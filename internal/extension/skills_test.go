@@ -1,8 +1,10 @@
 package extension
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -144,6 +146,45 @@ Deploy steps.
 	_, ok = FindSkill(skills, "deploy")
 	if !ok {
 		t.Fatal("deploy skill not found")
+	}
+}
+
+// TestLoadSkillsSortedByName pins the deterministic result order: bundled
+// skills come out of a map walk and per-directory order follows the
+// filesystem, so LoadSkillsWithOptions sorts the merged slice by name before
+// returning. Every consumer — the skills menu, the system instruction
+// prefix — depends on the order being stable across calls.
+func TestLoadSkillsSortedByName(t *testing.T) {
+	dir := t.TempDir()
+	// Created in reverse-name order: the filesystem walk alone would keep it.
+	for _, name := range []string{"zulu", "mike", "alpha"} {
+		skillDir := filepath.Join(dir, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := fmt.Sprintf("---\nname: %s\ndescription: %s skill\n---\nBody.\n", name, name)
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	skills, err := LoadSkills(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.IsSortedFunc(skills, func(a, b Skill) int {
+		return strings.Compare(a.Name, b.Name)
+	}) {
+		names := make([]string, 0, len(skills))
+		for _, s := range skills {
+			names = append(names, s.Name)
+		}
+		t.Errorf("LoadSkills returned unsorted names: %v", names)
+	}
+	for _, name := range []string{"alpha", "mike", "zulu"} {
+		if _, ok := FindSkill(skills, name); !ok {
+			t.Errorf("skill %q missing from result", name)
+		}
 	}
 }
 

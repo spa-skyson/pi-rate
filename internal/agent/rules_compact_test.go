@@ -60,8 +60,8 @@ func TestLargeContextFileCompactsToOutline(t *testing.T) {
 }
 
 // TestCompactContextFilesBudgetStubs pins the whole-block budget: when the
-// per-file outlines no longer fit maxRulesBlock together, a later file is
-// replaced by an explicit pointer instead of being dropped or inlined.
+// per-file pieces no longer fit maxRulesBlock together, everything past the
+// first overflow collapses into one terminal pointer — not a stub per file.
 func TestCompactContextFilesBudgetStubs(t *testing.T) {
 	files := []contextFile{
 		{path: "/repo/AGENTS.md", content: largeAgentsFixture()},
@@ -74,14 +74,51 @@ func TestCompactContextFilesBudgetStubs(t *testing.T) {
 	if len(got) > maxRulesBlock {
 		t.Fatalf("compacted rules are %d chars, want <= %d", len(got), maxRulesBlock)
 	}
-	if !strings.Contains(got, "Skipped: the project-rules prompt budget is exhausted") {
-		t.Errorf("a file that does not fit must leave an explicit pointer, got tail %q", got[maxRulesBlock-400:])
+	if n := strings.Count(got, "- Skipped:"); n != 1 {
+		t.Errorf("got %d skip lines, want exactly one terminal pointer", n)
 	}
-	if !strings.Contains(got, "# Tiny") {
-		t.Error("a small file after an exhausted budget must still be inlined")
+	for _, path := range []string{"/repo/inner/AGENTS.md", "/repo/inner/CLAUDE.md"} {
+		if !strings.Contains(got, path) {
+			t.Errorf("terminal pointer must name %s, got tail %q", path, got[len(got)-400:])
+		}
+	}
+	if !strings.Contains(got, "### /repo/AGENTS.md") {
+		t.Error("the file that fit must still contribute its outline")
 	}
 	if !strings.HasSuffix(got, rulesReadHint) {
 		t.Error("an outlined rules body must end with the read hint")
+	}
+}
+
+// TestCompactContextFilesBudgetHoldsForManyFiles is the monorepo guard from
+// review: 25 discovered context files with long paths must still assemble a
+// rules block within maxRulesBlock — one terminal pointer for the overflow,
+// never a stub per file (per-file stubs grew the block by ~200 bytes each
+// and broke the ceiling past ~20 files).
+func TestCompactContextFilesBudgetHoldsForManyFiles(t *testing.T) {
+	root := t.TempDir()
+	files := make([]contextFile, 0, 25)
+	for i := range 25 {
+		pkg := fmt.Sprintf("pkg%02d-with-a-fairly-long-descriptive-service-name", i)
+		files = append(files, contextFile{
+			path:    filepath.Join(root, "services", pkg, "AGENTS.md"),
+			content: largeAgentsFixture(),
+		})
+	}
+
+	got := compactContextFiles(files)
+
+	if len(got) > maxRulesBlock {
+		t.Fatalf("rules block for 25 files is %d chars, want <= %d", len(got), maxRulesBlock)
+	}
+	if n := strings.Count(got, "- Skipped:"); n != 1 {
+		t.Errorf("got %d skip lines, want exactly one terminal pointer", n)
+	}
+	if !strings.Contains(got, "24 more files") {
+		t.Errorf("terminal pointer must count the 24 files past the overflow, got tail %q", got[len(got)-400:])
+	}
+	if !strings.Contains(got, files[0].path) {
+		t.Error("the first file's outline is what fit; its header must survive")
 	}
 }
 

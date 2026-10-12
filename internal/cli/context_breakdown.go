@@ -36,7 +36,7 @@ func buildContextBreakdown(
 	agents []subagent.AgentConfig,
 ) *tui.ContextBreakdown {
 	b := &tui.ContextBreakdown{
-		SystemPrompt: tokensFromChars(len(parts.Base)),
+		SystemPrompt: tokensFromChars(len(parts.Base) + len(parts.Env)),
 		Rules:        tokensFromChars(len(parts.Rules)),
 		Skills:       tokensFromChars(len(parts.Skills)),
 	}

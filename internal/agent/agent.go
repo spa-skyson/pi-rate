@@ -1137,13 +1137,12 @@ func skillMenuDescription(desc string) string {
 //
 // Each skill renders as exactly one bounded line: name plus first sentence of
 // the description (see skillMenuDescription). The menu's job is discovery —
-// picking which skill to load — not documenting it. Skills are rendered in
-// name order: LoadSkills walks a map for bundled skills, and a random menu
-// order would break the byte-stable prefix the gateway's cache relies on.
+// picking which skill to load — not documenting it. Entries render in the
+// order given: LoadSkills returns them in name order (the sort lives in
+// LoadSkillsWithOptions, where every consumer benefits), so the menu
+// inherits a deterministic order without this function re-sorting the
+// caller's slice behind its back.
 func appendSkillsMenu(skills []extension.Skill) string {
-	slices.SortFunc(skills, func(a, b extension.Skill) int {
-		return strings.Compare(a.Name, b.Name)
-	})
 	var b strings.Builder
 	b.WriteString("\n\n# Available Skills\n\n")
 	for _, s := range skills {
@@ -1224,9 +1223,14 @@ const rulesReadHint = "\n\nFull section texts are not inlined. Before working in
 
 // compactContextFiles renders discovered context files into the "# Project
 // Rules" body. Files at or under maxRulesFileBudget are inlined whole;
-// larger ones become a bounded section outline — never silently skipped. The
-// assembled body is capped at maxRulesBlock; a piece that no longer fits
-// leaves an explicit pointer to its file instead of its text.
+// larger ones become a bounded section outline. Within the 128KB per-file
+// read cap nothing is silently skipped — a file contributes either its text
+// or an explicit pointer to itself; files over that cap are still rejected
+// whole by readInstructionFile before this sees them, and their absence is
+// not announced here. The body is capped at maxRulesBlock no matter how many
+// files are discovered: pieces are added while they fit, and everything past
+// the first overflow collapses into one terminal pointer that is itself held
+// within the remaining budget.
 func compactContextFiles(files []contextFile) string {
 	rendered := make([]string, 0, len(files))
 	outlined := false
@@ -1243,11 +1247,15 @@ func compactContextFiles(files []contextFile) string {
 
 	var b strings.Builder
 	for i, piece := range rendered {
-		if b.Len()+len(piece) > budget {
-			fmt.Fprintf(&b, "### %s\n\n- Skipped: the project-rules prompt budget is exhausted; read %s for the full text.\n", files[i].path, files[i].path)
-			continue
+		sep := 0
+		if b.Len() > 0 {
+			sep = 1
 		}
-		if i > 0 {
+		if b.Len()+sep+len(piece) > budget {
+			writeSkipCounter(&b, files[i:], budget-b.Len())
+			break
+		}
+		if sep == 1 {
 			b.WriteString("\n")
 		}
 		b.WriteString(piece)
@@ -1256,6 +1264,38 @@ func compactContextFiles(files []contextFile) string {
 		b.WriteString(rulesReadHint)
 	}
 	return b.String()
+}
+
+// skipFloor is the smallest tail the terminal skip line is still written
+// for. Below it the budget wins outright: a pointer that would not fit is
+// dropped rather than allowed to push the block past maxRulesBlock.
+const skipFloor = 64
+
+// writeSkipCounter appends the single terminal line for files that did not
+// fit the rules budget: a count plus as many of their paths as the remaining
+// budget holds, then an ellipsis. The line never exceeds remaining, so the
+// block stays within maxRulesBlock regardless of the file count.
+func writeSkipCounter(b *strings.Builder, files []contextFile, remaining int) {
+	if remaining < skipFloor {
+		return
+	}
+	const frame = " — read any of them for the full text."
+	const ellipsis = ", …"
+	line := fmt.Sprintf("- Skipped: %d more files exceeded the project-rules budget:", len(files))
+	used := len(line) + len(frame) + 1
+	for i, f := range files {
+		next := f.path
+		if i > 0 {
+			next = ", " + f.path
+		}
+		if used+len(next)+len(ellipsis) > remaining {
+			line += ellipsis
+			break
+		}
+		line += next
+		used += len(next)
+	}
+	b.WriteString(line + frame + "\n")
 }
 
 // renderContextFile renders one context file for the Rules block: whole when
@@ -1313,9 +1353,12 @@ func outlineEntry(s outlineSection) string {
 	return fmt.Sprintf("- L%d: %s — %s\n", s.line, s.head, s.desc)
 }
 
-// sectionOutline extracts the markdown sections of content: fenced code
-// blocks are skipped, so a `#` shell comment inside one is not taken for a
-// heading.
+// sectionOutline extracts the markdown sections of content. Recognition is
+// deliberately narrow: ATX headings (lines starting with "#") and ``` fences
+// only. Setext headings (underlined titles) and ~~~ fences are not
+// recognized — an odd fence count or an underlined title can only shorten
+// the outline, never corrupt it. Fenced code is skipped, so a `#` shell
+// comment inside one is not taken for a heading.
 func sectionOutline(content string) []outlineSection {
 	var out []outlineSection
 	inFence := false

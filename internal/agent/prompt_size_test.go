@@ -158,26 +158,32 @@ func TestSkillsMenuBudget(t *testing.T) {
 	}
 }
 
-// TestSkillsMenuSortedByName pins the deterministic menu order: bundled
-// skills come out of a map walk in extension.LoadSkills, and a random menu
-// order would break the byte-stable prefix the gateway's cache relies on.
+// TestSkillsMenuSortedByName pins the deterministic menu order end to end:
+// bundled skills come out of a map walk in extension.LoadSkills, so the
+// name-order guarantee lives upstream in LoadSkillsWithOptions (where every
+// consumer benefits) and the menu simply inherits it. A reordered menu
+// would shift the prompt's static prefix byte for byte and defeat the
+// gateway's prefix cache.
 func TestSkillsMenuSortedByName(t *testing.T) {
-	skills := []extension.Skill{
-		{Name: "zulu", Description: "Last."},
-		{Name: "alpha", Description: "First."},
-		{Name: "mike", Description: "Middle."},
+	skills, err := extension.LoadSkills()
+	if err != nil {
+		t.Fatalf("LoadSkills() error: %v", err)
+	}
+	if len(skills) < 2 {
+		t.Fatalf("got %d bundled skills, want a few to observe the order", len(skills))
 	}
 
 	menu := appendSkillsMenu(skills)
-
-	alpha := strings.Index(menu, "/alpha")
-	mike := strings.Index(menu, "/mike")
-	zulu := strings.Index(menu, "/zulu")
-	if alpha == -1 || mike == -1 || zulu == -1 {
-		t.Fatalf("menu lost a skill: %q", menu)
-	}
-	if alpha > mike || mike > zulu {
-		t.Errorf("menu entries must be sorted by name, got %q", menu)
+	pos := -1
+	for _, s := range skills {
+		at := strings.Index(menu, "/"+s.Name+":")
+		if at < 0 {
+			t.Fatalf("menu lost /%s: %q", s.Name, menu)
+		}
+		if at < pos {
+			t.Fatalf("menu entry /%s renders out of name order: %q", s.Name, menu)
+		}
+		pos = at
 	}
 }
 
