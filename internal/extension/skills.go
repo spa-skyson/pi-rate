@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -81,6 +82,14 @@ func LoadSkillsWithOptions(opts LoadOptions, dirs ...string) ([]Skill, error) {
 		notice.Notifyf("%d skill(s) blocked due to security audit. Run 'pirate audit' for details.", len(blocked))
 	}
 
+	// Name order, deterministically: bundled skills come out of a map walk
+	// and per-directory order follows the filesystem, so without this the
+	// skill list could reorder between calls — and every prompt built from
+	// it (the skills menu, the system instruction prefix) would shift byte
+	// for byte, defeating gateway prefix caching.
+	slices.SortFunc(skills, func(a, b Skill) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return skills, nil
 }
 

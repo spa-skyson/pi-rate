@@ -473,10 +473,39 @@ func TestLoadInstructionInjectsRuntimeEnvironment(t *testing.T) {
 	t.Setenv("PWD", "/tmp/test-project")
 	t.Setenv("LANG", "en_US.UTF-8")
 
+	env := "\n\n# Runtime Environment\n\nThe following values are from the current process environment. Treat them as authoritative; do not guess or substitute values for them.\n\n- HOME=\"/tmp/test-home\"\n- USER=\"test-user\"\n- PWD=\"/tmp/test-project\"\n\nLanguage: English (United States) is the required language for your responses.\n"
+
 	got := loadInstructionFrom("Base instruction.", "/tmp/fallback-cwd", "/tmp/test-home")
-	want := "# Runtime Environment\n\nThe following values are from the current process environment. Treat them as authoritative; do not guess or substitute values for them.\n\n- HOME=\"/tmp/test-home\"\n- USER=\"test-user\"\n- PWD=\"/tmp/test-project\"\n\nLanguage: English (United States) is the required language for your responses.\n\nBase instruction."
-	if !strings.HasPrefix(got, want) {
-		t.Fatalf("runtime environment should be the first prompt section, got %q", got)
+	if !strings.HasPrefix(got, "Base instruction.") {
+		t.Fatalf("static prompt must come before the runtime environment, got %q", got)
+	}
+	if !strings.HasSuffix(got, env) {
+		t.Fatalf("runtime environment must be the last prompt section, got %q", got)
+	}
+}
+
+// TestLoadInstructionPrefixStableAcrossEnv pins the cache-first ordering:
+// when only the volatile environment changes, the static prefix (persona,
+// rules, skills) stays byte-identical, so the LLM gateway's prefix cache
+// keeps hitting across the calls of a session.
+func TestLoadInstructionPrefixStableAcrossEnv(t *testing.T) {
+	testenv.SetHome(t, "/tmp/test-home")
+	t.Setenv("USER", "test-user")
+	t.Setenv("LANG", "en_US.UTF-8")
+	t.Setenv("PWD", "/tmp/test-project")
+
+	parts := loadInstructionPartsFrom("Base instruction.", "/tmp/fallback-cwd", "/tmp/test-home")
+	prefix := parts.Base + parts.Rules + parts.Skills
+	first := parts.String()
+
+	t.Setenv("PWD", "/tmp/other-project")
+	second := loadInstructionFrom("Base instruction.", "/tmp/fallback-cwd", "/tmp/test-home")
+
+	if !strings.HasPrefix(first, prefix) || !strings.HasPrefix(second, prefix) {
+		t.Fatalf("both prompts must start with the same static prefix %q", prefix)
+	}
+	if first == second {
+		t.Fatal("changing PWD must still change the volatile suffix, got two identical prompts")
 	}
 }
 

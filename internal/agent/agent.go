@@ -903,11 +903,13 @@ var contextFileNames = []string{
 // discovered skills to the base instruction. Context files (AGENT.md,
 // AGENTS.md, CLAUDE.md, or .pirate/AGENTS.md; first match per directory) are
 // discovered by walking from the working directory up to the filesystem
-// root; a global ~/.pirate/AGENTS.md is included first when present.
+// root; a global ~/.pirate/AGENTS.md is included first when present. Files
+// above maxRulesFileBudget are compacted to a section outline instead of
+// being inlined whole.
 func LoadInstruction(baseInstruction string) string {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return prependEnvironmentContext(baseInstruction, os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), "")
+		return InstructionParts{Base: baseInstruction, Env: environmentContext(os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), "")}.String()
 	}
 	home, _ := os.UserHomeDir()
 	return loadInstructionFrom(baseInstruction, cwd, home)
@@ -920,17 +922,23 @@ func LoadInstruction(baseInstruction string) string {
 type InstructionParts struct {
 	// Base is the built-in system prompt.
 	Base string
-	// Rules is the concatenated AGENTS.md / CLAUDE.md project context.
+	// Rules is the compacted AGENTS.md / CLAUDE.md project context.
 	Rules string
 	// Skills is the "# Available Skills" menu.
 	Skills string
+	// Env is the volatile "# Runtime Environment" block. It is composed last
+	// so everything before it stays byte-stable across calls of a session.
+	Env string
 }
 
-// String reassembles the parts into the prompt the model receives. Keeping
-// composition here means the breakdown can never drift from the real prompt:
-// LoadInstruction returns exactly this.
+// String reassembles the parts into the prompt the model receives: the
+// static blocks first (persona, rules, skills), the volatile environment
+// last. Keeping composition here means the breakdown can never drift from
+// the real prompt: LoadInstruction returns exactly this. A stable prefix is
+// what lets the LLM gateway's prefix cache hit, so new static content must
+// go into one of the first three parts, never into Env.
 func (p InstructionParts) String() string {
-	return p.Base + p.Rules + p.Skills
+	return p.Base + p.Rules + p.Skills + p.Env
 }
 
 // loadInstructionFrom is the testable core of LoadInstruction, resolving
@@ -954,25 +962,25 @@ func LoadInstructionPartsFor(baseInstruction, cwd string) InstructionParts {
 func LoadInstructionParts(baseInstruction string) InstructionParts {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return InstructionParts{Base: prependEnvironmentContext(baseInstruction, os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), "")}
+		return InstructionParts{Base: baseInstruction, Env: environmentContext(os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), "")}
 	}
 	home, _ := os.UserHomeDir()
 	return loadInstructionPartsFrom(baseInstruction, cwd, home)
 }
 
-// prependEnvironmentContext adds the process context before the built-in prompt
-// so the agent has authoritative values for common shell variables. LANG is
-// mapped to a language name and stated as the agent's required response
-// language; it is omitted when LANG is unset or empty.
-func prependEnvironmentContext(baseInstruction, home, user, pwd, lang, cwd string) string {
+// environmentContext renders the volatile "# Runtime Environment" block with
+// a leading blank-line separator, ready to be appended after the static
+// prompt blocks. LANG is mapped to a language name and stated as the agent's
+// required response language; it is omitted when LANG is unset or empty.
+func environmentContext(home, user, pwd, lang, cwd string) string {
 	if pwd == "" {
 		pwd = cwd
 	}
-	env := fmt.Sprintf("# Runtime Environment\n\nThe following values are from the current process environment. Treat them as authoritative; do not guess or substitute values for them.\n\n- HOME=%q\n- USER=%q\n- PWD=%q\n", home, user, pwd)
+	env := fmt.Sprintf("\n\n# Runtime Environment\n\nThe following values are from the current process environment. Treat them as authoritative; do not guess or substitute values for them.\n\n- HOME=%q\n- USER=%q\n- PWD=%q\n", home, user, pwd)
 	if lang != "" {
 		env += fmt.Sprintf("\nLanguage: %s is the required language for your responses.\n", languageName(lang))
 	}
-	return env + "\n" + baseInstruction
+	return env
 }
 
 // languageName maps a POSIX locale (e.g. "en_US.UTF-8") to a human-readable
@@ -1070,10 +1078,10 @@ var localeRegionNames = map[string]string{
 }
 
 func loadInstructionPartsFrom(baseInstruction, cwd, home string) InstructionParts {
-	parts := InstructionParts{Base: prependEnvironmentContext(baseInstruction, os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), cwd)}
+	parts := InstructionParts{Base: baseInstruction}
 
-	if contents := discoverContextFiles(cwd, home); len(contents) > 0 {
-		parts.Rules = "\n\n# Project Rules\n\n" + strings.Join(contents, "\n\n")
+	if files := discoverContextFiles(cwd, home); len(files) > 0 {
+		parts.Rules = "\n\n# Project Rules\n\n" + compactContextFiles(files)
 	}
 
 	// Get skills. Skill discovery (skillsDirs / disableLegacySkillDirs, or
@@ -1086,6 +1094,8 @@ func loadInstructionPartsFrom(baseInstruction, cwd, home string) InstructionPart
 	if err == nil && len(skills) > 0 {
 		parts.Skills = appendSkillsMenu(skills)
 	}
+
+	parts.Env = environmentContext(os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), cwd)
 
 	return parts
 }
@@ -1127,7 +1137,11 @@ func skillMenuDescription(desc string) string {
 //
 // Each skill renders as exactly one bounded line: name plus first sentence of
 // the description (see skillMenuDescription). The menu's job is discovery —
-// picking which skill to load — not documenting it.
+// picking which skill to load — not documenting it. Entries render in the
+// order given: LoadSkills returns them in name order (the sort lives in
+// LoadSkillsWithOptions, where every consumer benefits), so the menu
+// inherits a deterministic order without this function re-sorting the
+// caller's slice behind its back.
 func appendSkillsMenu(skills []extension.Skill) string {
 	var b strings.Builder
 	b.WriteString("\n\n# Available Skills\n\n")
@@ -1153,10 +1167,11 @@ type contextFile struct {
 	content string
 }
 
-// discoverContextFiles returns context-file contents ordered from most
-// general to most specific: the global ~/.pirate/AGENTS.md first, then one
-// file per directory from the filesystem root down to cwd.
-func discoverContextFiles(cwd, home string) []string {
+// discoverContextFiles returns context files ordered from most general to
+// most specific: the global ~/.pirate/AGENTS.md first, then one file per
+// directory from the filesystem root down to cwd. Contents are returned
+// whole; compaction to the prompt budget happens in compactContextFiles.
+func discoverContextFiles(cwd, home string) []contextFile {
 	// Walk from cwd up to the filesystem root, nearest directory first.
 	var found []contextFile
 	dir := filepath.Clean(cwd)
@@ -1184,12 +1199,211 @@ func discoverContextFiles(cwd, home string) []string {
 			}
 		}
 	}
+	return found
+}
 
-	contents := make([]string, 0, len(found))
-	for _, f := range found {
-		contents = append(contents, f.content)
+// Rules-block budgets. A context file at or under maxRulesFileBudget is
+// inlined whole — for a small file the full text is worth more than its
+// outline and no read round-trip is needed. Larger files are compacted to a
+// section outline capped at the same per-file budget, and the whole
+// "# Project Rules" block is capped at maxRulesBlock. Before the budgets
+// existed every context file was glued in whole, which put a 39KB AGENTS.md
+// on every LLM call of a session.
+const (
+	maxRulesFileBudget = 4 * 1024
+	maxRulesBlock      = 8 * 1024
+	// maxOutlineDesc caps a section's first-line description, in runes.
+	maxOutlineDesc = 100
+)
+
+// rulesReadHint tells the model how to get a section's full text. Appended
+// only when at least one file was outlined (for fully inlined files there is
+// nothing to read on demand).
+const rulesReadHint = "\n\nFull section texts are not inlined. Before working in an area, read its section with the read tool: file_path=<path>, offset=<line number>.\n"
+
+// compactContextFiles renders discovered context files into the "# Project
+// Rules" body. Files at or under maxRulesFileBudget are inlined whole;
+// larger ones become a bounded section outline. Within the 128KB per-file
+// read cap nothing is silently skipped — a file contributes either its text
+// or an explicit pointer to itself; files over that cap are still rejected
+// whole by readInstructionFile before this sees them, and their absence is
+// not announced here. The body is capped at maxRulesBlock no matter how many
+// files are discovered: pieces are added while they fit, and everything past
+// the first overflow collapses into one terminal pointer that is itself held
+// within the remaining budget.
+func compactContextFiles(files []contextFile) string {
+	rendered := make([]string, 0, len(files))
+	outlined := false
+	for _, f := range files {
+		piece, wasOutlined := renderContextFile(f)
+		outlined = outlined || wasOutlined
+		rendered = append(rendered, piece)
 	}
-	return contents
+
+	budget := maxRulesBlock
+	if outlined {
+		budget -= len(rulesReadHint)
+	}
+
+	var b strings.Builder
+	for i, piece := range rendered {
+		sep := 0
+		if b.Len() > 0 {
+			sep = 1
+		}
+		if b.Len()+sep+len(piece) > budget {
+			writeSkipCounter(&b, files[i:], budget-b.Len())
+			break
+		}
+		if sep == 1 {
+			b.WriteString("\n")
+		}
+		b.WriteString(piece)
+	}
+	if outlined {
+		b.WriteString(rulesReadHint)
+	}
+	return b.String()
+}
+
+// skipFloor is the smallest tail the terminal skip line is still written
+// for. Below it the budget wins outright: a pointer that would not fit is
+// dropped rather than allowed to push the block past maxRulesBlock.
+const skipFloor = 64
+
+// writeSkipCounter appends the single terminal line for files that did not
+// fit the rules budget: a count plus as many of their paths as the remaining
+// budget holds, then an ellipsis. The line never exceeds remaining, so the
+// block stays within maxRulesBlock regardless of the file count.
+func writeSkipCounter(b *strings.Builder, files []contextFile, remaining int) {
+	if remaining < skipFloor {
+		return
+	}
+	const frame = " — read any of them for the full text."
+	const ellipsis = ", …"
+	line := fmt.Sprintf("- Skipped: %d more files exceeded the project-rules budget:", len(files))
+	used := len(line) + len(frame) + 1
+	for i, f := range files {
+		next := f.path
+		if i > 0 {
+			next = ", " + f.path
+		}
+		if used+len(next)+len(ellipsis) > remaining {
+			line += ellipsis
+			break
+		}
+		line += next
+		used += len(next)
+	}
+	b.WriteString(line + frame + "\n")
+}
+
+// renderContextFile renders one context file for the Rules block: whole when
+// it fits maxRulesFileBudget, otherwise as a section outline. The second
+// result reports whether the outline (not the full text) was rendered.
+func renderContextFile(f contextFile) (string, bool) {
+	if len(f.content) <= maxRulesFileBudget {
+		return f.content, false
+	}
+	return outlineContextFile(f), true
+}
+
+// outlineSection is one markdown heading of a context file with the line the
+// heading starts at (1-based) and the first content line under it.
+type outlineSection struct {
+	line int
+	head string
+	desc string
+}
+
+// outlineContextFile compacts an oversized context file into a section
+// outline: every markdown heading with its line number and a one-line
+// description, capped at maxRulesFileBudget by dropping whole entries (the
+// remainder stays visible in a count line). An outline is never larger than
+// the file it stands for: the cap only applies above the inline threshold.
+func outlineContextFile(f contextFile) string {
+	entries := sectionOutline(f.content)
+	var b strings.Builder
+	fmt.Fprintf(&b, "### %s\n\n", f.path)
+	if len(entries) == 0 {
+		// No markdown headings to index — point at the file head instead of
+		// compacting to nothing.
+		fmt.Fprintf(&b, "- L1: (no markdown headings) — %s\n", truncateDesc(firstNonEmptyLine(f.content)))
+		return b.String()
+	}
+	used := b.Len()
+	for i, e := range entries {
+		line := outlineEntry(e)
+		if used+len(line) > maxRulesFileBudget {
+			fmt.Fprintf(&b, "- … +%d more sections; read %s for the full text.\n", len(entries)-i, f.path)
+			return b.String()
+		}
+		b.WriteString(line)
+		used += len(line)
+	}
+	return b.String()
+}
+
+// outlineEntry renders one outline line: the heading with its line number,
+// plus the section's first line when there is one.
+func outlineEntry(s outlineSection) string {
+	if s.desc == "" {
+		return fmt.Sprintf("- L%d: %s\n", s.line, s.head)
+	}
+	return fmt.Sprintf("- L%d: %s — %s\n", s.line, s.head, s.desc)
+}
+
+// sectionOutline extracts the markdown sections of content. Recognition is
+// deliberately narrow: ATX headings (lines starting with "#") and ``` fences
+// only. Setext headings (underlined titles) and ~~~ fences are not
+// recognized — an odd fence count or an underlined title can only shorten
+// the outline, never corrupt it. Fenced code is skipped, so a `#` shell
+// comment inside one is not taken for a heading.
+func sectionOutline(content string) []outlineSection {
+	var out []outlineSection
+	inFence := false
+	for i, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence || trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			out = append(out, outlineSection{line: i + 1, head: trimmed})
+			continue
+		}
+		if n := len(out); n > 0 && out[n-1].desc == "" {
+			out[n-1].desc = truncateDesc(trimmed)
+		}
+	}
+	return out
+}
+
+// firstNonEmptyLine returns the first non-blank line of content, trimmed.
+func firstNonEmptyLine(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// truncateDesc caps s at maxOutlineDesc runes on a word boundary with an
+// ellipsis.
+func truncateDesc(s string) string {
+	runes := []rune(s)
+	if len(runes) <= maxOutlineDesc {
+		return s
+	}
+	cut := string(runes[:maxOutlineDesc-1])
+	if i := strings.LastIndex(cut, " "); i > 0 {
+		cut = cut[:i] // cut back to a word boundary, not mid-word
+	}
+	return cut + "…"
 }
 
 // readContextFileIn returns the first context file found in dir.
