@@ -433,10 +433,11 @@ func oaiRunStreaming(ctx context.Context, client *openai.Client, params openai.C
 // oaiRunStreamingExtract is oaiRunStreaming with an optional hook that pulls
 // reasoning text out of each chunk's raw JSON. The openai-go SDK has no field
 // for OpenRouter's delta.reasoning / delta.reasoning_details, so providers
-// backed by OpenRouter pass openrouterDeltaThinking here; nil skips the
-// extraction. Reasoning streams as "thinking"-role partials (the same shape
-// the Anthropic and Ollama providers emit, which the TUI renders with 💭);
-// it is re-sent as turn content only when the model produced nothing else.
+// backed by OpenRouter pass openrouterDeltaThinking here; nil selects the
+// default extractor for the standard delta.reasoning_content field. Reasoning
+// streams as "thinking"-role partials (the same shape the Anthropic and
+// Ollama providers emit, which the TUI renders with 💭); it is re-sent as turn
+// content only when the model produced nothing else.
 func oaiRunStreamingExtract(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool, extractThinking func(rawChunk string) string) {
 	oaiRunStreamingHooks(ctx, client, params, yield, oaiExtractHooks{deltaThinking: extractThinking})
 }
@@ -444,10 +445,14 @@ func oaiRunStreamingExtract(ctx context.Context, client *openai.Client, params o
 // oaiExtractHooks collects the escape hatches a provider needs when it puts
 // data where the openai-go SDK has no field for it. Every hook is optional.
 type oaiExtractHooks struct {
-	// deltaThinking pulls reasoning text out of one streaming chunk's raw JSON.
+	// deltaThinking pulls reasoning text out of one streaming chunk's raw
+	// JSON. On the streaming path the field is never nil: oaiRunStreamingHooks
+	// installs the default (oaiDeltaReasoningContent, reading the standard
+	// delta.reasoning_content field) when the provider did not bring its own,
+	// so an installed extractor owns reasoning extraction exclusively.
 	deltaThinking func(rawChunk string) string
 	// messageThinking pulls reasoning text out of a non-streaming completion's
-	// raw JSON.
+	// raw JSON. nil means the completion carries nothing to extract.
 	messageThinking func(rawResponse string) string
 	// answerText rewrites the content string the SDK decoded before it is
 	// treated as answer text. Mistral reasoning models send content as a JSON
@@ -471,6 +476,14 @@ func (h oaiExtractHooks) answer(content string) string {
 // same shape the Anthropic and Ollama providers emit, which the TUI renders
 // with 💭); it is re-sent as turn content only when the model produced nothing
 // else.
+//
+// A provider that installs its own deltaThinking extractor keeps exclusive
+// ownership of reasoning extraction. One without one gets the default, which
+// reads the standard delta.reasoning_content field: reasoning models on
+// OpenAI-compatible endpoints (z.ai GLM, DeepSeek, LiteLLM-style proxies)
+// stream their whole thinking phase there, and chunks carrying only that
+// field produced no yield at all — a live stream was indistinguishable from
+// silence to the idle watcher, which aborted it mid-thinking.
 func oaiRunStreamingHooks(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool, hooks oaiExtractHooks) {
 	params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
 		IncludeUsage: param.NewOpt(true),
@@ -481,6 +494,10 @@ func oaiRunStreamingHooks(ctx context.Context, client *openai.Client, params ope
 
 	state := &oaiStreamState{toolCalls: make(map[int64]map[string]any)}
 
+	if hooks.deltaThinking == nil {
+		hooks.deltaThinking = oaiDeltaReasoningContent
+	}
+
 	for stream.Next() {
 		chunk := stream.Current()
 		if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
@@ -488,7 +505,7 @@ func oaiRunStreamingHooks(ctx context.Context, client *openai.Client, params ope
 			state.completionTokens = chunk.Usage.CompletionTokens
 			state.cachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
 		}
-		if hooks.deltaThinking != nil && len(chunk.Choices) > 0 {
+		if len(chunk.Choices) > 0 {
 			if think := hooks.deltaThinking(chunk.RawJSON()); think != "" {
 				state.thinking += think
 				if !yield(&model.LLMResponse{
@@ -537,6 +554,29 @@ func oaiRunStreamingHooks(ctx context.Context, client *openai.Client, params ope
 	_ = yield(buildOaiFinalResponse(state), nil)
 }
 
+// oaiDeltaReasoningContent extracts the reasoning text from one streaming
+// chunk's raw JSON, reading delta.reasoning_content — the field OpenAI-
+// compatible endpoints stream model thinking in (z.ai GLM, DeepSeek,
+// LiteLLM-style proxies). The openai-go SDK has no field for it, so it is
+// recovered from the chunk's raw JSON the same way the OpenRouter extraction
+// recovers its own shapes. Returns "" when the chunk carries none.
+func oaiDeltaReasoningContent(rawChunk string) string {
+	var payload struct {
+		Choices []struct {
+			Delta struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(rawChunk), &payload); err != nil {
+		return ""
+	}
+	if len(payload.Choices) == 0 {
+		return ""
+	}
+	return payload.Choices[0].Delta.ReasoningContent
+}
+
 func oaiRunNonStreaming(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool) {
 	oaiRunNonStreamingExtract(ctx, client, params, yield, nil)
 }
@@ -550,6 +590,12 @@ func oaiRunNonStreamingExtract(ctx context.Context, client *openai.Client, param
 
 // oaiRunNonStreamingHooks is oaiRunNonStreaming with the full set of provider
 // hooks (see oaiExtractHooks). The reasoning is prepended to the response parts.
+//
+// Unlike the streaming path, this one has no default reasoning extractor: a
+// completion whose thinking arrives in message.reasoning_content is decoded
+// only by a provider that installs messageThinking for it. The asymmetry is a
+// known limitation — the reason the streaming path got its default is the
+// idle watcher, which does not apply here.
 func oaiRunNonStreamingHooks(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool, hooks oaiExtractHooks) {
 	completion, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {
