@@ -34,7 +34,7 @@ type LsEntry struct {
 }
 
 func newLsTool(sb *Sandbox) (tool.Tool, error) {
-	return newTool("ls", "List the contents of a directory. Returns file names, types (file/directory), and sizes.", func(_ agent.Context, input LsInput) (LsOutput, error) {
+	return newTool("ls", "List the contents of a directory. Returns file names, types (file/directory), and sizes. Absolute paths outside the working directory are allowed.", func(_ agent.Context, input LsInput) (LsOutput, error) {
 		return lsHandler(sb, input)
 	})
 }
@@ -45,7 +45,9 @@ func lsHandler(sb *Sandbox, input LsInput) (LsOutput, error) {
 		dir = "."
 	}
 
-	entries, err := sb.ReadDir(dir)
+	// ReadDirAnywhere: an absolute directory outside the sandbox root lists
+	// like any other (issue #69); relative paths resolve identically.
+	entries, err := sb.ReadDirAnywhere(dir)
 	if err != nil {
 		return LsOutput{}, fmt.Errorf("reading directory: %w", err)
 	}

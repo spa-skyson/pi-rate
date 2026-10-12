@@ -109,7 +109,7 @@ func newReadImageTool(sb *Sandbox) (tool.Tool, error) {
 
 Use this after a screenshot has been saved to disk, or to inspect a remote image by URL.
 
-Required: file_path — either an absolute/sandbox-relative path to a local image, or an https:// URL to a remote image.
+Required: file_path — either an absolute/sandbox-relative path to a local image, or an https:// URL to a remote image. Absolute paths outside the working directory are allowed.
 
 URL fetching is gated by a conservative egress policy: only https, only public hosts. http://, loopback, private networks, link-local, and multicast destinations are all rejected.`, func(_ agent.Context, input ReadImageInput) (ReadImageOutput, error) {
 		return readImageHandler(sb, input)
@@ -135,14 +135,16 @@ func readImageHandler(sb *Sandbox, input ReadImageInput) (ReadImageOutput, error
 		sourceURL = input.FilePath
 	}
 
-	info, err := sb.Stat(path)
+	// Read-only accessors: an image anywhere on the filesystem is readable
+	// (issue #69).
+	info, err := sb.StatAnywhere(path)
 	if err != nil {
 		return ReadImageOutput{}, fmt.Errorf("reading image: %w", err)
 	}
 	if info.Size() > maxImageBytes {
 		return ReadImageOutput{}, fmt.Errorf("image too large: %d bytes exceeds %d byte limit", info.Size(), maxImageBytes)
 	}
-	data, err := sb.ReadFile(path)
+	data, err := sb.ReadFileAnywhere(path)
 	if err != nil {
 		return ReadImageOutput{}, fmt.Errorf("reading image: %w", err)
 	}

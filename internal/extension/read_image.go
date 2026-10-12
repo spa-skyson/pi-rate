@@ -110,7 +110,7 @@ func latestReadImageContent(contents []*genai.Content) *genai.Content {
 // sniffs as an image, would otherwise ride into the prompt as raw context on
 // every step. The tool's limit is the same constant, not a second number.
 //
-// The read is bounded before allocation: sb.Open + io.LimitReader cap the
+// The read is bounded before allocation: sb.OpenAnywhere + io.LimitReader cap the
 // bytes pulled off disk at MaxImageBytes+1, so a file that grew into the
 // hundreds of megabytes between the tool call and this step costs one
 // capped read and a warning, not a full-size allocation per step.
@@ -143,7 +143,11 @@ func (in *readImageInjector) readImageParts(parts []*genai.Part) []*genai.Part {
 // sandbox. The LimitReader runs at cap+1 so an over-cap file is detected as
 // such — not silently truncated into an injection candidate.
 func readBoundedImage(sb *tools.Sandbox, path string) ([]byte, error) {
-	f, err := sb.Open(path)
+	// OpenAnywhere, not Open: the read_image handler accepts absolute paths
+	// outside the sandbox root (issue #69). A strict re-read here would drop
+	// the injection after the handler already reported success — the model
+	// would believe it has seen the image and has not.
+	f, err := sb.OpenAnywhere(path)
 	if err != nil {
 		return nil, err
 	}

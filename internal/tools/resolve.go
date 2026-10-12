@@ -27,6 +27,11 @@ var blockedPaths = map[string]bool{
 	"/dev/full":    true,
 }
 
+// errBlockedDevice is the refusal for device files that must not be read.
+func errBlockedDevice(path string) error {
+	return fmt.Errorf("%s is a device file, not a readable file; reading it would block or return unbounded data", path)
+}
+
 // isBlockedPath reports whether path names a device that must not be read.
 func isBlockedPath(path string) bool {
 	// Slash-normalized: these are POSIX device names, and a model hands them
@@ -39,6 +44,12 @@ func isBlockedPath(path string) bool {
 	// /proc/<pid>/fd/* is the same hazard wearing a different name: reading one
 	// can block forever on a pipe the agent has no control over.
 	if strings.HasPrefix(clean, "/proc/") && strings.Contains(clean, "/fd/") {
+		return true
+	}
+	// /dev/fd/* is /proc/self/fd/* by another name — a symlink to it on
+	// Linux, with /dev/fd/1 ≡ /dev/stdout — so it is the same hazard and
+	// blocked for the same reason.
+	if strings.HasPrefix(clean, "/dev/fd/") {
 		return true
 	}
 	return false
@@ -93,10 +104,12 @@ func pathCandidates(path string) []string {
 // common case costs one Stat and nothing else.
 func resolveReadPath(sb *Sandbox, path string) (string, os.FileInfo, error) {
 	if isBlockedPath(path) {
-		return "", nil, fmt.Errorf("%s is a device file, not a readable file; reading it would block or return unbounded data", path)
+		return "", nil, errBlockedDevice(path)
 	}
 
-	info, err := sb.Stat(path)
+	// StatAnywhere, not Stat: the read tools accept absolute paths outside
+	// the sandbox root (issue #69); relative paths resolve identically.
+	info, err := sb.StatAnywhere(path)
 	if err == nil {
 		return path, info, nil
 	}
@@ -106,7 +119,7 @@ func resolveReadPath(sb *Sandbox, path string) (string, os.FileInfo, error) {
 		if isBlockedPath(candidate) {
 			continue
 		}
-		if info, err := sb.Stat(candidate); err == nil {
+		if info, err := sb.StatAnywhere(candidate); err == nil {
 			return candidate, info, nil
 		}
 	}
@@ -127,7 +140,9 @@ func didYouMean(sb *Sandbox, path string) string {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 
-	entries, err := sb.ReadDir(dir)
+	// ReadDirAnywhere: for a path outside the sandbox root the neighbors are
+	// outside too; relative dirs resolve identically to ReadDir.
+	entries, err := sb.ReadDirAnywhere(dir)
 	if err != nil || len(entries) == 0 {
 		return ""
 	}

@@ -174,9 +174,24 @@ func TestSandbox_ReadFile_OutsideSandbox(t *testing.T) {
 	dir := t.TempDir()
 	sb := testSandbox(t, dir)
 
-	_, err := sb.ReadFile("/etc/passwd")
-	if err == nil {
-		t.Error("expected error for path outside sandbox")
+	// Retuned for issue #69: read tools read outside the sandbox root via
+	// ReadFileAnywhere, while the strict ReadFile — the one edit and write
+	// go through — still refuses. Pin both halves of that contract.
+	outsidePath := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := sb.ReadFile(outsidePath); err == nil {
+		t.Error("expected strict ReadFile to refuse a path outside the sandbox")
+	}
+
+	data, err := sb.ReadFileAnywhere(outsidePath)
+	if err != nil {
+		t.Fatalf("ReadFileAnywhere(%s): %v", outsidePath, err)
+	}
+	if string(data) != "outside" {
+		t.Errorf("ReadFileAnywhere = %q, want %q", data, "outside")
 	}
 }
 
@@ -736,7 +751,9 @@ func TestSandbox_ExtraDir_StillBlocksOtherPaths(t *testing.T) {
 		t.Fatalf("AddExtraDir: %v", err)
 	}
 
-	// Paths under a different directory should still be blocked.
+	// Paths under a different directory should still be blocked — by the
+	// strict ReadFile that mutating tools share. The read tools' Anywhere
+	// accessors may read it: reads are allowed anywhere (issue #69).
 	_, err = sb.ReadFile(filepath.Join(otherDir, "secret.txt"))
 	if err == nil {
 		t.Error("expected error reading from non-allowed directory")

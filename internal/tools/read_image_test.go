@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,32 @@ func writeTestPNG(t *testing.T, path string) {
 	defer f.Close()
 	if err := png.Encode(f, img); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestReadImageHandler_DeviceFileStillBlocked pins the fallback guard
+// itself: read_image never passes through resolveReadPath's device
+// pre-check, so its refusal must come from outsideAbs inside the Anywhere
+// fallback — blocked before any I/O.
+//
+// Skipped on Windows: unix device paths carry no drive letter, so
+// filepath.IsAbs("/dev/zero") is false there and the outside-fallback —
+// the only caller of isBlockedPath on this route — never engages. The
+// read is still refused, just by os.Root's escape check instead; the
+// device-file wording is a unix-only contract.
+func TestReadImageHandler_DeviceFileStillBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix device paths are not absolute on Windows, so the outside-fallback (and its device-file refusal) never engages")
+	}
+
+	sb := testSandbox(t, t.TempDir())
+
+	_, err := readImageHandler(sb, ReadImageInput{FilePath: "/dev/zero"})
+	if err == nil {
+		t.Fatal("expected /dev/zero read to be refused")
+	}
+	if !strings.Contains(err.Error(), "device file") {
+		t.Errorf("err = %v, want the device-file refusal", err)
 	}
 }
 
@@ -68,12 +95,18 @@ func TestReadImageHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("escapes sandbox", func(t *testing.T) {
+	// Retuned for issue #69: read_image is a read tool, and an absolute
+	// path outside the sandbox root now succeeds in one call.
+	t.Run("outside sandbox reads", func(t *testing.T) {
 		outside := filepath.Join(os.TempDir(), "outside-read-image.png")
 		writeTestPNG(t, outside)
 		defer os.Remove(outside)
-		if _, err := readImageHandler(sb, ReadImageInput{FilePath: outside}); err == nil {
-			t.Error("expected error for path outside sandbox")
+		out, err := readImageHandler(sb, ReadImageInput{FilePath: outside})
+		if err != nil {
+			t.Fatalf("readImageHandler(%s): %v", outside, err)
+		}
+		if out.Path != outside {
+			t.Errorf("Path = %q, want %q", out.Path, outside)
 		}
 	})
 }
