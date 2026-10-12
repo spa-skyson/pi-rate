@@ -339,7 +339,7 @@ must not be there either.
 
 ## Lint is repo-wide
 
-**CI runs golangci-lint (v2.13, pinned in `ci.yml`) over the whole repository,
+**CI runs golangci-lint (v2.14, pinned in `ci.yml`) over the whole repository,
 and so do the local hooks — package-scoped runs are not equivalent.**
 `golangci-lint run ./internal/yourpkg/` proves nothing about what CI will say:
 the config enables `errcheck` with `check-type-assertions: true`, `govet` with
