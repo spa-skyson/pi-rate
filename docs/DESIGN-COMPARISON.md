@@ -118,7 +118,7 @@ Legend: ✅ present · 🟡 partial/divergent · ❌ absent · 🧩 "via extensi
 | Session logging (structured) | 🟡 session JSONL only | ✅ separate JSON logs `~/.pi-go/log/…` | |
 | HTML session export / gist share | ✅ `/export`, `/share` | ❌ | |
 | ATIF trajectory export | ❌ | ✅ v1.6 (`pi atif export`) | |
-| Image support (paste, vision, auto-resize) | ✅ Ctrl+V paste, 2000×2000 resize, terminal render | 🟡 vision via genai; no paste/resize UX | |
+| Image support (paste, vision, auto-resize) | ✅ Ctrl+V paste, 2000×2000 resize, terminal render | 🟡 vision on 5 providers (gemini/openai/anthropic/mistral/ollama); no paste/resize UX | |
 | Bash escape hatch in editor (`!cmd`, `!!cmd`) | ✅ | ❌ | |
 | External editor (Ctrl+G `$EDITOR`) | ✅ | ❌ | |
 | Web search | ❌ 🧩 | 🟡 via MCP server config | |
@@ -427,7 +427,7 @@ runtime.
 ### P2 — breadth
 10. **Provider breadth** (OpenRouter, Groq, xAI, Bedrock, Vertex; GitHub
     Copilot subscription auth) and a user `models.json`.
-11. **Image paste + auto-resize UX** in the TUI.
+11. **Image paste + auto-resize UX** in the TUI — vision forwarding to gemini/openai/anthropic/mistral/ollama already works; what remains is the paste/resize UX (and, optionally, bmp/tiff conversion).
 12. **`!`/`!!` inline bash and external `$EDITOR`** in the editor.
 13. **Public Go SDK** — promote a stable subset of `internal/` to `pkg/` (or
     a versioned module) if embedding is ever a goal; note this conflicts with

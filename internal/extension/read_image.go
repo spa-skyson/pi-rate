@@ -2,7 +2,10 @@ package extension
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
+	"strings"
 	"sync"
 
 	"google.golang.org/adk/v2/agent"
@@ -10,6 +13,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
+	"github.com/spa-skyson/pi-rate/internal/forwardmime"
 	"github.com/spa-skyson/pi-rate/internal/notice"
 	"github.com/spa-skyson/pi-rate/internal/tools"
 )
@@ -96,8 +100,20 @@ func latestReadImageContent(contents []*genai.Content) *genai.Content {
 
 // readImageParts reads the file behind every read_image FunctionResponse in
 // parts and returns the inline image parts to append, in the order the
-// responses appear. A file that cannot be read is skipped — the textual path
-// result still stands on its own.
+// responses appear. A file that cannot be read — or whose bytes fail the
+// same size and MIME checks the tool applied when it accepted the file — is
+// skipped, and the textual path result still stands on its own.
+//
+// The re-check is not paranoia about the tool: this callback re-reads the
+// file on every agentic step, long after the tool's own checks ran. A file
+// that has grown past the cap, or been replaced by something that no longer
+// sniffs as an image, would otherwise ride into the prompt as raw context on
+// every step. The tool's limit is the same constant, not a second number.
+//
+// The read is bounded before allocation: sb.Open + io.LimitReader cap the
+// bytes pulled off disk at MaxImageBytes+1, so a file that grew into the
+// hundreds of megabytes between the tool call and this step costs one
+// capped read and a warning, not a full-size allocation per step.
 func (in *readImageInjector) readImageParts(parts []*genai.Part) []*genai.Part {
 	var out []*genai.Part
 	for _, part := range parts {
@@ -105,14 +121,41 @@ func (in *readImageInjector) readImageParts(parts []*genai.Part) []*genai.Part {
 		if !ok {
 			continue
 		}
-		data, err := in.sb.ReadFile(path)
+		data, err := readBoundedImage(in.sb, path)
 		if err != nil {
 			in.warn(path, err)
 			continue
 		}
-		out = append(out, genai.NewPartFromBytes(data, detectImageMIMEType(data, path)))
+		mimeType := detectImageMIMEType(data, path)
+		switch {
+		case !strings.HasPrefix(mimeType, "image/"):
+			in.warn(path, fmt.Errorf("no longer sniffs as an image (detected %q)", mimeType))
+		case !forwardmime.ForwardableImageMIME(mimeType):
+			in.warn(path, fmt.Errorf("%s sniffs as an image the provider wire formats cannot carry; the model will not see it", mimeType))
+		default:
+			out = append(out, genai.NewPartFromBytes(data, mimeType))
+		}
 	}
 	return out
+}
+
+// readBoundedImage reads at most tools.MaxImageBytes bytes of path through the
+// sandbox. The LimitReader runs at cap+1 so an over-cap file is detected as
+// such — not silently truncated into an injection candidate.
+func readBoundedImage(sb *tools.Sandbox, path string) ([]byte, error) {
+	f, err := sb.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, tools.MaxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > tools.MaxImageBytes {
+		return nil, fmt.Errorf("%d+ bytes exceeds the %d byte image limit", tools.MaxImageBytes, tools.MaxImageBytes)
+	}
+	return data, nil
 }
 
 // warn reports a path the callback could not read, at most once per path.

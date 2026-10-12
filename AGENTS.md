@@ -339,7 +339,7 @@ must not be there either.
 
 ## Lint is repo-wide
 
-**CI runs golangci-lint (v2.13, pinned in `ci.yml`) over the whole repository,
+**CI runs golangci-lint (v2.14, pinned in `ci.yml`) over the whole repository,
 and so do the local hooks — package-scoped runs are not equivalent.**
 `golangci-lint run ./internal/yourpkg/` proves nothing about what CI will say:
 the config enables `errcheck` with `check-type-assertions: true`, `govet` with
@@ -366,7 +366,7 @@ root run would have caught it before the tag. As of 2026-10-03 a full
 
 ## Build, test, lint
 
-Go 1.27.0. Use the Makefile rather than raw `go` invocations where a target
+Go 1.27.2. Use the Makefile rather than raw `go` invocations where a target
 exists:
 
 ```bash

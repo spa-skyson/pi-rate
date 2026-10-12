@@ -16,6 +16,9 @@
             pname = "pi-go";
             inherit version;
             src = ./.;
+            # vendorHash is stale after the 2026-10 go.mod bump
+            # (x/* upgrades); the first `nix build` must update it —
+            # Nix will print the correct hash. Do not guess.
             vendorHash = "sha256-43goJ21uDYZbTOwELp7V3IqxeGhWi5wmIgP6qLy4G4Q=";
 
             # The repository currently requires Go 1.27, which is not yet
@@ -29,7 +32,7 @@
             # does not degrade to a no-op, it aborts the build.
             postPatch = ''
               substituteInPlace go.mod \
-                --replace-fail 'go 1.27.0' 'go 1.26.5'
+                --replace-fail 'go 1.27.2' 'go 1.26.5'
             '';
 
             subPackages = [ "cmd/pi" ];
