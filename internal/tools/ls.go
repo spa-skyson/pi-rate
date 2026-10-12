@@ -45,7 +45,9 @@ func lsHandler(sb *Sandbox, input LsInput) (LsOutput, error) {
 		dir = "."
 	}
 
-	entries, err := sb.ReadDir(dir)
+	// ReadDirAnywhere: an absolute directory outside the sandbox root lists
+	// like any other (issue #69); relative paths resolve identically.
+	entries, err := sb.ReadDirAnywhere(dir)
 	if err != nil {
 		return LsOutput{}, fmt.Errorf("reading directory: %w", err)
 	}

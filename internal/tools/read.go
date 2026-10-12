@@ -78,7 +78,7 @@ type ReadOutput struct {
 func newReadTool(sb *Sandbox, ledger *ReadLedger) (tool.Tool, error) {
 	return newTool("read", `Read a file's contents. Returns the content with line numbers.
 
-offset is 1-based. Large files come back a window at a time; next_offset is the exact offset to pass to continue.`,
+offset is 1-based. Large files come back a window at a time; next_offset is the exact offset to pass to continue. Absolute paths outside the working directory are allowed.`,
 		func(_ agent.Context, input ReadInput) (ReadOutput, error) {
 			// The ledger must be threaded through here, not dropped: write
 			// gates on it, so a read that does not record leaves every
@@ -224,7 +224,7 @@ func renderWindow(win window, offset, totalLines int) ReadOutput {
 
 // readPrefix reads up to n bytes from the start of a file for classification.
 func readPrefix(sb *Sandbox, path string, n int) ([]byte, error) {
-	f, err := sb.Open(path)
+	f, err := sb.OpenAnywhere(path)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +240,7 @@ func readPrefix(sb *Sandbox, path string, n int) ([]byte, error) {
 
 // readNotebook renders a .ipynb as a document rather than returning its JSON.
 func readNotebook(sb *Sandbox, path string) (ReadOutput, error) {
-	data, err := sb.ReadFile(path)
+	data, err := sb.ReadFileAnywhere(path)
 	if err != nil {
 		return ReadOutput{}, fmt.Errorf("reading file: %w", err)
 	}
@@ -278,7 +278,7 @@ type window struct {
 // be fully materialized before the window that was going to discard it is ever
 // applied.
 func readWindow(sb *Sandbox, path string, offset, limit int) (window, error) {
-	f, err := sb.Open(path)
+	f, err := sb.OpenAnywhere(path)
 	if err != nil {
 		return window{}, err
 	}
@@ -437,7 +437,7 @@ func appendClamped(dst, src []byte, clamp, clipped int) ([]byte, int) {
 // too many for every file that ends in a newline, which is nearly all of them.
 // The model paginates on this number, so the error was not cosmetic.
 func countFileLines(sb *Sandbox, path string) (int, error) {
-	f, err := sb.Open(path)
+	f, err := sb.OpenAnywhere(path)
 	if err != nil {
 		return 0, err
 	}

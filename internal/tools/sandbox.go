@@ -42,22 +42,17 @@ func isTransientReadError(err error) bool {
 }
 
 // Sandbox provides a secure file system abstraction that restricts
-// all file operations to a specific directory tree.
+// mutating file operations to a specific directory tree.
 //
 // SECURITY MODEL:
-//   - All file paths are resolved relative to the sandbox root
-//   - Access outside the sandbox is blocked via os.Root (Go 1.24+)
-//   - This prevents the agent from accessing sensitive files outside
-//     the working directory
-//
-// LIMITATIONS:
-//   - Files outside the sandbox cannot be accessed
-//   - Symlinks pointing outside are blocked
-//   - Absolute paths are converted to relative
-//
-// WORKAROUNDS:
-//   - Change the working directory to access different files
-//   - Use tools that explicitly access external resources (e.g., fetch URLs)
+//   - Mutating operations (WriteFile, MkdirAll) and the reads that feed
+//     them (Stat, Open, ReadFile, ReadDir) are restricted to the sandbox
+//     root via os.Root (Go 1.24+): paths resolve relative to the root,
+//     symlinks pointing outside are blocked, absolute paths are converted
+//     to relative.
+//   - The read-only tools (read, read_image, ls) go through the *Anywhere
+//     accessors instead, which additionally allow absolute paths anywhere
+//     on the filesystem for reading; device files stay blocked (issue #69).
 type Sandbox struct {
 	root        *os.Root
 	dir         string // absolute path of the root directory
@@ -282,7 +277,13 @@ func (s *Sandbox) ReadFile(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readFileRoot(root, rel)
+}
 
+// readFileRoot reads rel from root, retrying transient errors. Shared by the
+// strict ReadFile and ReadFileAnywhere so both behave identically for
+// anything that resolves inside the sandbox.
+func readFileRoot(root *os.Root, rel string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxReadRetries; attempt++ {
 		data, err := root.ReadFile(rel)
@@ -300,6 +301,110 @@ func (s *Sandbox) ReadFile(name string) ([]byte, error) {
 		}
 	}
 	return nil, lastErr
+}
+
+// ─── Read-only access outside the sandbox root (issue #69) ──────────────
+//
+// The read tools (read, read_image, ls) accept absolute paths anywhere on
+// the filesystem: read is non-destructive, and refusing it turned one cheap
+// tool call into a second model turn through bash — +15-20s and a wasted
+// model call per attempt (measured 2026-10-12). The *Anywhere accessors are
+// the whole mechanism: identical to the strict accessors for anything that
+// resolves inside the sandbox — os.Root still enforces symlink containment
+// there — plus plain os calls for absolute paths outside it.
+//
+// DECISION, against the alternatives:
+//   - A second Sandbox rooted at the filesystem root would resolve relative
+//     paths against that root and break every relative read.
+//   - A read-only flag on Resolve would put the permissive path one flag
+//     away from write.go and edit.go, which call the same accessors and
+//     must keep today's exact errors. Distinct methods keep the strict path
+//     as the default and permissiveness opt-in per call site.
+//
+// The fallback fires for absolute paths only: relative paths, including
+// ".."-escapes, surface the strict Resolve error unchanged. Device files
+// stay blocked via isBlockedPath. grep/find/tree are not extended: they walk
+// the sandbox FS, and searching an arbitrary root is a different mechanism.
+
+// outsideAbs returns the absolute path the read-only fallback may touch.
+// An empty path with a nil error means the fallback does not apply (name is
+// relative) and the caller must surface the original sandbox error.
+func outsideAbs(name string) (abs string, err error) {
+	if !filepath.IsAbs(name) {
+		return "", nil
+	}
+	if isBlockedPath(name) {
+		return "", errBlockedDevice(name)
+	}
+	return filepath.Clean(name), nil
+}
+
+// readAnywhere applies the read-only fallback: run fn on the cleaned
+// absolute path when name is absolute and not a blocked device, otherwise
+// surface resolveErr — the sandbox error — unchanged.
+func readAnywhere[T any](name string, resolveErr error, fn func(abs string) (T, error)) (T, error) {
+	var zero T
+	abs, blocked := outsideAbs(name)
+	switch {
+	case blocked != nil:
+		return zero, blocked
+	case abs == "":
+		return zero, resolveErr
+	}
+	return fn(abs)
+}
+
+// StatAnywhere is Stat for read-only callers: outside absolute paths stat
+// against the real filesystem.
+func (s *Sandbox) StatAnywhere(name string) (os.FileInfo, error) {
+	root, rel, err := s.resolveToRoot(name)
+	if err == nil {
+		return root.Lstat(rel)
+	}
+	return readAnywhere(name, err, os.Stat)
+}
+
+// OpenAnywhere is Open for read-only callers: outside absolute paths open
+// against the real filesystem.
+func (s *Sandbox) OpenAnywhere(name string) (*os.File, error) {
+	root, rel, err := s.resolveToRoot(name)
+	if err == nil {
+		return root.Open(rel)
+	}
+	return readAnywhere(name, err, os.Open)
+}
+
+// ReadFileAnywhere is ReadFile for read-only callers: outside absolute
+// paths are read from the real filesystem. Inside the sandbox both share
+// readFileRoot, transient-error retries included.
+func (s *Sandbox) ReadFileAnywhere(name string) ([]byte, error) {
+	root, rel, err := s.resolveToRoot(name)
+	if err == nil {
+		return readFileRoot(root, rel)
+	}
+	return readAnywhere(name, err, os.ReadFile)
+}
+
+// ReadDirAnywhere is ReadDir for read-only callers: outside absolute
+// directories are listed from the real filesystem.
+func (s *Sandbox) ReadDirAnywhere(name string) ([]os.DirEntry, error) {
+	root, rel, err := s.resolveToRoot(name)
+	if err == nil {
+		f, openErr := root.Open(rel)
+		if openErr != nil {
+			return nil, openErr
+		}
+		defer f.Close()
+		return f.ReadDir(-1)
+	}
+	return readAnywhere(name, err, func(abs string) ([]os.DirEntry, error) {
+		f, openErr := os.Open(abs)
+		if openErr != nil {
+			return nil, openErr
+		}
+		defer f.Close()
+		return f.ReadDir(-1)
+	})
 }
 
 // WriteFile writes data to the named file within the sandbox, creating it if

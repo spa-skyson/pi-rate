@@ -68,12 +68,18 @@ func TestReadImageHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("escapes sandbox", func(t *testing.T) {
+	// Retuned for issue #69: read_image is a read tool, and an absolute
+	// path outside the sandbox root now succeeds in one call.
+	t.Run("outside sandbox reads", func(t *testing.T) {
 		outside := filepath.Join(os.TempDir(), "outside-read-image.png")
 		writeTestPNG(t, outside)
 		defer os.Remove(outside)
-		if _, err := readImageHandler(sb, ReadImageInput{FilePath: outside}); err == nil {
-			t.Error("expected error for path outside sandbox")
+		out, err := readImageHandler(sb, ReadImageInput{FilePath: outside})
+		if err != nil {
+			t.Fatalf("readImageHandler(%s): %v", outside, err)
+		}
+		if out.Path != outside {
+			t.Errorf("Path = %q, want %q", out.Path, outside)
 		}
 	})
 }

@@ -135,14 +135,16 @@ func readImageHandler(sb *Sandbox, input ReadImageInput) (ReadImageOutput, error
 		sourceURL = input.FilePath
 	}
 
-	info, err := sb.Stat(path)
+	// Read-only accessors: an image anywhere on the filesystem is readable
+	// (issue #69).
+	info, err := sb.StatAnywhere(path)
 	if err != nil {
 		return ReadImageOutput{}, fmt.Errorf("reading image: %w", err)
 	}
 	if info.Size() > maxImageBytes {
 		return ReadImageOutput{}, fmt.Errorf("image too large: %d bytes exceeds %d byte limit", info.Size(), maxImageBytes)
 	}
-	data, err := sb.ReadFile(path)
+	data, err := sb.ReadFileAnywhere(path)
 	if err != nil {
 		return ReadImageOutput{}, fmt.Errorf("reading image: %w", err)
 	}
