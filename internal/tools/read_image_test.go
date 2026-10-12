@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +36,17 @@ func writeTestPNG(t *testing.T, path string) {
 // itself: read_image never passes through resolveReadPath's device
 // pre-check, so its refusal must come from outsideAbs inside the Anywhere
 // fallback — blocked before any I/O.
+//
+// Skipped on Windows: unix device paths carry no drive letter, so
+// filepath.IsAbs("/dev/zero") is false there and the outside-fallback —
+// the only caller of isBlockedPath on this route — never engages. The
+// read is still refused, just by os.Root's escape check instead; the
+// device-file wording is a unix-only contract.
 func TestReadImageHandler_DeviceFileStillBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix device paths are not absolute on Windows, so the outside-fallback (and its device-file refusal) never engages")
+	}
+
 	sb := testSandbox(t, t.TempDir())
 
 	_, err := readImageHandler(sb, ReadImageInput{FilePath: "/dev/zero"})

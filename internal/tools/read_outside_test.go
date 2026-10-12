@@ -42,6 +42,12 @@ func TestReadHandler_AbsolutePathOutsideRoot(t *testing.T) {
 // TestReadHandler_ProcFdStillBlocked pins the device block-list: fd-backed
 // paths are refused before any I/O, sandbox or not. Covers both spellings
 // of the procfs form and the /dev/fd alias.
+//
+// Platform-independent by construction: resolveReadPath calls
+// isBlockedPath — a pure string check, slash-normalized for Windows —
+// before any Stat, so the refusal and its wording are identical on every
+// GOOS. No windows skip needed, unlike TestReadImageHandler_
+// DeviceFileStillBlocked, whose route never reaches that pre-check.
 func TestReadHandler_ProcFdStillBlocked(t *testing.T) {
 	sb := testSandbox(t, t.TempDir())
 
