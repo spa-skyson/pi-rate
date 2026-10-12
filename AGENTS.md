@@ -366,7 +366,7 @@ root run would have caught it before the tag. As of 2026-10-03 a full
 
 ## Build, test, lint
 
-Go 1.27.0. Use the Makefile rather than raw `go` invocations where a target
+Go 1.27.2. Use the Makefile rather than raw `go` invocations where a target
 exists:
 
 ```bash
