@@ -2031,8 +2031,11 @@ func runPrint(ctx context.Context, ag *agent.Agent, sessionID, prompt string, lo
 	}
 	retryCfg := agent.DefaultRetryConfig()
 	// Say when a request is being re-sent, so a backoff pause is not mistaken
-	// for a hung run. stderr keeps it out of the captured reply.
+	// for a hung run. stderr keeps it out of the captured reply; the session
+	// log keeps the re-sends readable after the fact — without the log entry
+	// a provider outage left no trace there at all (issue #64).
 	ctx = retry.WithNotifier(ctx, func(a retry.Attempt) {
+		log.Info(a.String())
 		fmt.Fprintln(os.Stderr, a.String())
 	})
 	// GroundingMetadata repeats on every chunk of the response it grounds;
@@ -2241,6 +2244,12 @@ func runJSONTurn(ctx context.Context, ag *agent.Agent, sessionID, msg string, em
 	// Only this JSON-mode loop installs the hook, so nothing is written in
 	// TUI or print mode.
 	ctx = provider.WithStreamHeartbeat(ctx, em.keepalive)
+	// Record each re-send in the session log. JSON mode has no stderr line to
+	// announce retries on, so without this a backoff pause is invisible both
+	// in the protocol stream and in the log (issue #64).
+	ctx = retry.WithNotifier(ctx, func(a retry.Attempt) {
+		log.Info(a.String())
+	})
 	started := false
 	// SSE delivers the reply as deltas and then once more as an aggregate;
 	// without this every text_delta is emitted twice. One dedup per turn: it
