@@ -91,20 +91,69 @@ func readHTTPRequest(br *bufio.Reader) error {
 // that has stopped serving its established connections accepts and goes
 // silent. So a retry that draws a parked socket sits out another idle
 // budget, and only a retry on a fresh dial completes.
-func serveKeepAliveConn(conn net.Conn, br *bufio.Reader, firstContentLength int64) {
+func serveKeepAliveConn(conn net.Conn, br *bufio.Reader, firstContentLength int64, withhold <-chan struct{}) {
 	defer conn.Close()
 	if firstContentLength > 0 {
 		if _, err := io.CopyN(io.Discard, br, firstContentLength); err != nil {
 			return
 		}
 	}
-	serveCompleteKeepAlive(conn, zombieSSERequest)
+	if withhold == nil {
+		serveCompleteKeepAlive(conn, zombieSSERequest)
+	} else {
+		// The same SSE turn, but the terminating chunk is withheld until
+		// the signal fires: the client-side response never EOFs, so the
+		// socket stays busy and cannot be drawn by the second parking
+		// turn. The overlap the pool accounting depends on is enforced
+		// here rather than hoped from the scheduler — a scheduling skew
+		// that ran the turns sequentially handed the second turn the
+		// first's parked socket, and the reuse got the zombie silence
+		// (issue #72 stress runs, "parking stage saw 1 dials"). The timer
+		// is a hang guard: on release the turn completes and the dial
+		// accounting fails loudly instead of hanging.
+		fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", len(zombieSSERequest), zombieSSERequest)
+		select {
+		case <-withhold:
+		case <-time.After(60 * time.Second):
+		}
+		fmt.Fprintf(conn, "0\r\n\r\n")
+	}
 	// The socket is parked in the client's pool now. The next thing that
 	// can arrive on it is a reused request — the zombie stage.
 	if err := readHTTPRequest(br); err != nil {
 		return // the peer (or the test cleanup) went away
 	}
 	holdSilent(conn, antSSEPrelude)
+}
+
+// measureHealthyTurn times one full unwatched streaming turn against a
+// scratch server: the cost a healthy solo turn imposes and that the idle
+// budget must clear (issue #72). Scratch server and scratch client, so the
+// calibration dial never shows up in the main fixture's accounting — the
+// zombie stage below asserts exactly 3 connections there. A plain handler
+// serving the same SSE body is the same work the fixture turns do: dial,
+// request, one-shot chunked response, drain.
+func measureHealthyTurn(t *testing.T, req *model.LLMRequest) time.Duration {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(zombieSSERequest))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	m, err := NewAnthropic(context.Background(), "claude-sonnet-4-6", "sk-test", srv.URL, "none", &LLMOptions{InsecureSkipTLS: true})
+	if err != nil {
+		t.Fatalf("calibration NewAnthropic: %v", err)
+	}
+	start := time.Now()
+	_, errs := drainWatch(m.GenerateContent(context.Background(), req, true))
+	if len(errs) != 0 {
+		t.Fatalf("calibration turn failed: %v", errs)
+	}
+	return time.Since(start)
 }
 
 // serveCompleteKeepAlive writes a full SSE turn as one chunk plus the
@@ -120,10 +169,16 @@ func serveCompleteKeepAlive(conn net.Conn, body string) {
 // silent — the zombie of issue #45: a gateway that accepted the request and
 // stopped talking. It unblocks only when the client tears the connection down
 // (the idle abort cancels the request context, and closing the in-flight
-// socket is what the side read reports) or on a safety timer, so a broken
-// abort fails the test instead of hanging it. The timer sits 20× above the
-// scaled idle budget (25s vs 1250ms), so a working abort always wins the
-// race; only a broken abort path makes the test wait it out.
+// socket is what the side read reports) or on a failsafe timer, so a broken
+// abort fails the test instead of hanging it. The timer is fixed at 60s —
+// 6× the largest budget the test can derive (10s, see the calibration) —
+// so a working abort always wins the race, and only a broken abort path
+// makes the test wait it out. The value deliberately does NOT travel through
+// the handler closure: with the calibration currently above the server
+// creation a closure would be safe, but nothing pins that order — moved
+// below, the derived write would race the server goroutines reading it (a
+// stale zero closed the socket mid-zombie and the abort never fired —
+// issue #72 stress run).
 func holdSilent(conn net.Conn, prelude string) {
 	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n%s", prelude)
 	gone := make(chan struct{})
@@ -138,7 +193,7 @@ func holdSilent(conn net.Conn, prelude string) {
 	}()
 	select {
 	case <-gone:
-	case <-time.After(25 * time.Second):
+	case <-time.After(60 * time.Second):
 	}
 	conn.Close()
 }
@@ -163,6 +218,36 @@ func TestStreamIdleAbortDropsZombieConnectionBeforeRetry(t *testing.T) {
 			c.Close()
 		}
 	})
+
+	req := &model.LLMRequest{Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Hi"}}}}}
+
+	// The retry stage's idle budget is derived from what a full solo turn
+	// actually costs on this machine right now, not from a constant: the
+	// retry turn is healthy traffic that must complete inside the budget,
+	// and a fixed budget has died on healthy traffic twice — the original
+	// 250ms (fixed by scaling ×5, issue #61) and again at 1250ms, when on
+	// a loaded CI runner even a fully served turn (dial, request, one-shot
+	// response, drain) overran it and the watch fired on the parking stage
+	// itself (CI runs 37302981844, 37326239257; PRs #10, #14, #15 — issue
+	// #72). The margin is #61's ×5, but derived from a fresh measurement
+	// instead of hoping a constant clears it; the 1250ms floor keeps the
+	// #61 budget on a quiet machine, and the 10s cap keeps every derived
+	// guard below holdSilent's fixed 60s failsafe. The zombie stage needs
+	// the budget only as silence to detect, so scaling it keeps that
+	// detection and both failure injections intact.
+	turnCost := measureHealthyTurn(t, req)
+	idleBudget := min(10*time.Second, max(1250*time.Millisecond, 5*turnCost))
+	// The retry guard below rides on the budget here in the test goroutine
+	// (the derived value must not travel through the server-side closure —
+	// see holdSilent): the fixed guard sat 20× above the #61 budget, and
+	// max(25s, 4×) keeps that coverage at any scale within the cap.
+	safety := max(25*time.Second, 4*idleBudget)
+	t.Logf("calibration turn took %v; idle budget derived as %v", turnCost, idleBudget)
+
+	// The fixture enforces its own overlap: the first connection withholds
+	// its terminating chunk until the second dial (serveKeepAliveConn), so
+	// the two parking turns cannot degenerate into sequential reuse.
+	secondDial := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, br, err := hijacker(w)
 		if err != nil {
@@ -171,8 +256,15 @@ func TestStreamIdleAbortDropsZombieConnectionBeforeRetry(t *testing.T) {
 		mu.Lock()
 		live = append(live, conn)
 		mu.Unlock()
-		dials.Add(1)
-		serveKeepAliveConn(conn, br.Reader, r.ContentLength)
+		n := dials.Add(1)
+		var withhold <-chan struct{}
+		switch n {
+		case 1:
+			withhold = secondDial
+		case 2:
+			close(secondDial)
+		}
+		serveKeepAliveConn(conn, br.Reader, r.ContentLength, withhold)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -188,28 +280,16 @@ func TestStreamIdleAbortDropsZombieConnectionBeforeRetry(t *testing.T) {
 	if opts.closeIdle == nil {
 		t.Fatal("NewAnthropic left opts.closeIdle unset; the idle watch would have nothing to close")
 	}
-	// The idle budget is 1250ms — the original 250ms scaled ×5, same move
-	// as the issue #61 fix: every duration in this test (the budget, the
-	// holdSilent and retry guards below) moved together, so the
-	// budget-vs-work proportions are unchanged. The parking turns are
-	// healthy traffic that must complete inside the budget, and on a
-	// loaded CI runner even a fully served turn (dial, request, one-shot
-	// response, drain) overran 250ms — the idle watch fired on the
-	// parking stage itself and the test died before its zombie stage
-	// (CI runs 37302981844, 37326239257). The zombie stage needs the
-	// budget only as silence to detect, so scaling it keeps that
-	// detection and both failure injections intact.
-	watched := idleStreamModel{inner: m, timeout: 1250 * time.Millisecond, tick: 0, closeIdle: opts.closeIdle}
 
-	req := &model.LLMRequest{Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Hi"}}}}}
-
-	// Parking stage: two concurrent streaming turns complete and leave two
-	// idle keep-alive sockets in this client's pool. Two, not one — the
-	// zombie attempt below consumes the socket it draws, and the retry must
-	// still find one parked behind it to be able to draw a dead socket.
+	// Parking stage: two streaming turns complete and leave two idle
+	// keep-alive sockets in this client's pool. Two, not one — the zombie
+	// attempt below consumes the socket it draws, and the retry must still
+	// find one parked behind it to be able to draw a dead socket. The turns
+	// run unwatched: their property is the parked sockets, not the watch —
+	// healthy traffic vs the watch is TestStreamIdleHealthyStreamPasses'
+	// subject.
 	turn := func() {
-		_, errs := drainWatch(watched.GenerateContent(context.Background(), req, true))
-		if len(errs) != 0 {
+		if _, errs := drainWatch(m.GenerateContent(context.Background(), req, true)); len(errs) != 0 {
 			t.Errorf("parking turn failed: %v", errs)
 		}
 	}
@@ -225,6 +305,7 @@ func TestStreamIdleAbortDropsZombieConnectionBeforeRetry(t *testing.T) {
 	if got := dials.Load(); got != 2 {
 		t.Fatalf("parking stage saw %d dials, want 2 — the pool did not end up with two idle sockets", got)
 	}
+	watched := idleStreamModel{inner: m, timeout: idleBudget, tick: 0, closeIdle: opts.closeIdle}
 
 	// Attempt 1: the zombie. The request reuses a parked socket, and the
 	// gateway answers reused sockets with silence. Must yield exactly the
@@ -254,12 +335,13 @@ func TestStreamIdleAbortDropsZombieConnectionBeforeRetry(t *testing.T) {
 			t.Error("retry completed without a response")
 		}
 	}()
-	// 25s mirrors the old 5s guard scaled ×5 with the budget — still 20×
-	// above the idle window, and only reachable when the retry hangs on a
-	// dead pooled socket.
+	// safety — max(25s, 4× the derived budget) — and only reachable when
+	// the retry hangs on a dead pooled socket: a broken closeIdle makes the
+	// retry fail with a second idle error after at most one extra budget,
+	// well inside this guard.
 	select {
 	case <-done:
-	case <-time.After(25 * time.Second):
+	case <-time.After(safety):
 		t.Fatal("retry after the idle abort did not complete: the pool handed the dead connection back")
 	}
 	if got := dials.Load(); got != 3 {
@@ -343,26 +425,57 @@ func TestCloseIdleConnectionsClearsClientPool(t *testing.T) {
 			_ = resp.Body.Close()
 		}
 	}()
+	// One bound for every scheduler-ordering wait in this test: each covers
+	// an in-process event that costs milliseconds locally, so 5s is ~100×
+	// the cost, absorbs a loaded runner's stalls, and still fails a
+	// genuinely broken pool in seconds.
+	const waitBound = 5 * time.Second
 	resp, err := client.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
 	_ = resp.Body.Close()
+	// The silent goroutine dials on the scheduler's schedule, so the dial
+	// count is waited for, not asserted the instant the ok GET returns: the
+	// 2026-10-13 CI run failed this test in 0.05s on exactly that ordering
+	// (issue #72, the same runner-noise class the #61 scaling absorbed).
+	deadline := time.Now().Add(waitBound)
+	for dials.Load() != 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if got := dials.Load(); got != 2 {
 		t.Fatalf("got %d dials before the close, want 2 (silent + ok)", got)
 	}
-
-	client.CloseIdleConnections()
-	<-silentDone
+	// The silent request's client side must be done before the close, so
+	// the pool state below is quiescent. Its connection was closed by the
+	// body close, never pooled, so the eviction check is unaffected either
+	// way.
+	select {
+	case <-silentDone:
+	case <-time.After(waitBound):
+		t.Logf("silent request did not finish client-side within %v; continuing — its connection is active, not pooled", waitBound)
+	}
 
 	// The pool must be empty now: the next request dials a third connection.
-	resp, err = client.Get(srv.URL + "/")
-	if err != nil {
-		t.Fatalf("GET after close: %v", err)
+	// The transport parks a socket in its pool asynchronously after
+	// Body.Close — the readLoop goroutine does the parking — so a close can
+	// run before the socket has settled and miss it; on a loaded runner
+	// that ordering, not the eviction, is what trips a single-shot
+	// assertion (issue #72). Each attempt closes again and rechecks: a late
+	// park is caught by the next close, and every attempt asserts the
+	// property under test — a close makes the next request dial fresh.
+	deadline = time.Now().Add(waitBound)
+	for dials.Load() != 3 && time.Now().Before(deadline) {
+		client.CloseIdleConnections()
+		resp, err = client.Get(srv.URL + "/")
+		if err != nil {
+			t.Fatalf("GET after close: %v", err)
+		}
+		_ = resp.Body.Close()
+		time.Sleep(20 * time.Millisecond)
 	}
-	_ = resp.Body.Close()
 	if got := dials.Load(); got != 3 {
-		t.Errorf("got %d dials after CloseIdleConnections, want 3 — the pool still handed back a socket", got)
+		t.Fatalf("got %d dials after CloseIdleConnections, want 3 — the pool still handed back a socket", got)
 	}
 
 	// Control: a second close is harmless.

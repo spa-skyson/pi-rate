@@ -160,14 +160,20 @@ func TestStreamHeartbeatResetsOnChunks(t *testing.T) {
 	var ticks atomic.Int64
 	ctx := WithStreamHeartbeat(context.Background(), func() { ticks.Add(1) })
 
-	// 5 chunks 30ms apart (150ms total) against a 45ms interval: without a
-	// reset the counter would fire ~3 times.
-	inner := &stallModel{chunks: 5, delay: 30 * time.Millisecond}
-	watched := idleStreamModel{inner: inner, timeout: 0, tick: 45 * time.Millisecond}
+	// 5 chunks 100ms apart (500ms total) against a 400ms interval: without a
+	// reset the counter would fire at the absolute 400ms mark, before the
+	// last chunk lands. The 4× gap between the chunk cadence and the
+	// interval is the point — with a working reset a tick can only fire if
+	// the gap between two chunk deliveries exceeds 400ms, a scheduler stall
+	// an order of magnitude above the 15ms of slack the old 30ms/45ms pair
+	// allowed before a loaded CI runner tripped it (issue #72; the same
+	// runner-noise class the #61 ×5 scaling absorbed).
+	inner := &stallModel{chunks: 5, delay: 100 * time.Millisecond}
+	watched := idleStreamModel{inner: inner, timeout: 0, tick: 400 * time.Millisecond}
 
 	drainWatch(watched.GenerateContent(ctx, nil, true))
 	if got := ticks.Load(); got != 0 {
-		t.Errorf("got %d ticks while chunks flowed every 30ms against a 45ms interval, want 0 (reset broken)", got)
+		t.Errorf("got %d ticks while chunks flowed every 100ms against a 400ms interval, want 0 (reset broken)", got)
 	}
 }
 
