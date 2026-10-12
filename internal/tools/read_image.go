@@ -31,28 +31,6 @@ const MaxImageBytes = 20 * 1024 * 1024 // 20 MB
 // maxImageBytes is the package-internal spelling the tool's own checks use.
 const maxImageBytes = MaxImageBytes
 
-// forwardableImageMIMEs is the set of image MIME types the provider wire
-// formats can carry: the Anthropic base64 source spells the media types out,
-// and the OpenAI image_url endpoint rejects the rest. One set, declared once,
-// because three consumers must answer identically — the read_image tool that
-// produces the bytes, the injector that re-reads them (internal/extension),
-// and the adapters that put them on the wire (internal/provider).
-var forwardableImageMIMEs = map[string]bool{
-	"image/png":  true,
-	"image/jpeg": true,
-	"image/gif":  true,
-	"image/webp": true,
-}
-
-// ForwardableImageMIME reports whether mimeType is one the provider wire
-// formats can carry. read_image produces image/* types outside this set (the
-// byte sniffer names BMP image/bmp), so callers use this to skip — and warn
-// about — an image the model would never see rather than send it to be
-// rejected with a 400 that aborts the whole turn.
-func ForwardableImageMIME(mimeType string) bool {
-	return forwardableImageMIMEs[mimeType]
-}
-
 // imageFetchTimeout bounds the total time spent fetching a remote image. Most
 // legitimate image hosts respond in well under this; anything slower is almost
 // certainly a stalled connection or a denial-of-service attempt.
