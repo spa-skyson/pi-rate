@@ -46,12 +46,13 @@ func measure(name, s string) (string, int, int, int) {
 
 // TestSystemPromptSizeReport measures the system prompt a production run in
 // this repository assembles, section by section, and prints an honest
-// before/after for the skills menu. Log-only: it pins no budget (the menu
-// budget lives in TestSkillsMenuBudget) but makes a size regression visible
-// in test output.
+// before/after for the skills menu. It pins the rules budget from issue #67:
+// the compacted "# Project Rules" block must stay within maxRulesBlock, no
+// matter how large the repository's AGENTS.md files grow.
 //
 // Excluded from the numbers (machine-dependent, small): the Runtime
-// Environment preamble (~200 chars) and any global ~/.pirate/AGENTS.md.
+// Environment preamble (~250 chars, measured separately below) and any
+// global ~/.pirate/AGENTS.md.
 func TestSystemPromptSizeReport(t *testing.T) {
 	root := repoRoot(t)
 
@@ -68,16 +69,15 @@ func TestSystemPromptSizeReport(t *testing.T) {
 		v string
 	}{
 		{"Base (SystemInstruction)", parts.Base},
-		{"Rules (repo AGENTS.md)", parts.Rules},
+		{"Rules (compacted AGENTS.md)", parts.Rules},
 		{"Skills menu (before)", legacy},
 		{"Skills menu (after)", compact},
+		{"Environment (volatile)", parts.Env},
 	} {
 		name, chars, lines, tokens := measure(m.s, m.v)
 		t.Logf("%-28s %7d chars %5d lines ~%5d tokens", name, chars, lines, tokens)
 	}
-	name, chars, lines, tokens := measure("TOTAL-before", parts.Base+parts.Rules+legacy)
-	t.Logf("%-28s %7d chars %5d lines ~%5d tokens", name, chars, lines, tokens)
-	name, chars, lines, tokens = measure("TOTAL-after", parts.Base+parts.Rules+compact)
+	name, chars, lines, tokens := measure("TOTAL (as shipped)", parts.String())
 	t.Logf("%-28s %7d chars %5d lines ~%5d tokens", name, chars, lines, tokens)
 	t.Logf("skills menu: %d -> %d chars (%.0f%% smaller), %d skills",
 		len(legacy), len(compact), 100*(1-float64(len(compact))/float64(len(legacy))), len(skills))
@@ -87,6 +87,13 @@ func TestSystemPromptSizeReport(t *testing.T) {
 	}
 	if !strings.Contains(compact, "# Available Skills") {
 		t.Fatal("compact menu lost its header")
+	}
+
+	// The anti-bloat guard: AGENTS.md files above the inline threshold are
+	// compacted to outlines, so the rules block must stay within its budget
+	// however large the source files grow.
+	if limit := maxRulesBlock + len("\n\n# Project Rules\n\n"); len(parts.Rules) > limit {
+		t.Errorf("compacted rules are %d chars, want <= %d; an AGENTS.md is no longer compacted", len(parts.Rules), limit)
 	}
 
 	// Machine-realistic variant: the full production skill list (bundled +
@@ -148,6 +155,29 @@ func TestSkillsMenuBudget(t *testing.T) {
 	budget := len(header) + len(skills)*(maxSkillMenuDesc+16)
 	if len(menu) > budget {
 		t.Errorf("skills menu is %d chars, want <= %d (%d skills × %d-char description cap + header)", len(menu), budget, len(skills), maxSkillMenuDesc)
+	}
+}
+
+// TestSkillsMenuSortedByName pins the deterministic menu order: bundled
+// skills come out of a map walk in extension.LoadSkills, and a random menu
+// order would break the byte-stable prefix the gateway's cache relies on.
+func TestSkillsMenuSortedByName(t *testing.T) {
+	skills := []extension.Skill{
+		{Name: "zulu", Description: "Last."},
+		{Name: "alpha", Description: "First."},
+		{Name: "mike", Description: "Middle."},
+	}
+
+	menu := appendSkillsMenu(skills)
+
+	alpha := strings.Index(menu, "/alpha")
+	mike := strings.Index(menu, "/mike")
+	zulu := strings.Index(menu, "/zulu")
+	if alpha == -1 || mike == -1 || zulu == -1 {
+		t.Fatalf("menu lost a skill: %q", menu)
+	}
+	if alpha > mike || mike > zulu {
+		t.Errorf("menu entries must be sorted by name, got %q", menu)
 	}
 }
 
