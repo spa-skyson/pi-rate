@@ -6,21 +6,12 @@ import (
 
 	"google.golang.org/genai"
 
-	"github.com/spa-skyson/pi-rate/internal/tools"
+	"github.com/spa-skyson/pi-rate/internal/forwardmime"
 )
 
 // fallbackImageMIMEType is the MIME type assumed for an InlineData part whose
 // sniffer could not name a type. Every consumer here wants an image.
 const fallbackImageMIMEType = "image/png"
-
-// forwardableImageMIME reports whether a MIME type is one the image-bearing
-// wire formats here accept. The set lives in internal/tools (see
-// tools.ForwardableImageMIME) because the read_image injector in
-// internal/extension must skip the same images this package skips — one
-// answer, three consumers: the tool, the injector, and these adapters.
-func forwardableImageMIME(mimeType string) bool {
-	return tools.ForwardableImageMIME(mimeType)
-}
 
 // inlineImageOf reduces one InlineData part to the image blob the adapters
 // put on the wire: a blank MIME type falls back to image/png, and a type the
@@ -30,7 +21,7 @@ func inlineImageOf(blob *genai.Blob) (genai.Blob, bool) {
 	if strings.TrimSpace(mimeType) == "" {
 		mimeType = fallbackImageMIMEType
 	}
-	if !forwardableImageMIME(mimeType) {
+	if !forwardmime.ForwardableImageMIME(mimeType) {
 		return genai.Blob{}, false
 	}
 	return genai.Blob{Data: blob.Data, MIMEType: mimeType}, true
