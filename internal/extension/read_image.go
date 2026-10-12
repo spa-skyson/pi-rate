@@ -13,6 +13,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
+	"github.com/spa-skyson/pi-rate/internal/forwardmime"
 	"github.com/spa-skyson/pi-rate/internal/notice"
 	"github.com/spa-skyson/pi-rate/internal/tools"
 )
@@ -129,7 +130,7 @@ func (in *readImageInjector) readImageParts(parts []*genai.Part) []*genai.Part {
 		switch {
 		case !strings.HasPrefix(mimeType, "image/"):
 			in.warn(path, fmt.Errorf("no longer sniffs as an image (detected %q)", mimeType))
-		case !tools.ForwardableImageMIME(mimeType):
+		case !forwardmime.ForwardableImageMIME(mimeType):
 			in.warn(path, fmt.Errorf("%s sniffs as an image the provider wire formats cannot carry; the model will not see it", mimeType))
 		default:
 			out = append(out, genai.NewPartFromBytes(data, mimeType))

@@ -17,6 +17,8 @@ import (
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
+
+	"github.com/spa-skyson/pi-rate/internal/forwardmime"
 )
 
 // pngOneByOne returns the bytes of a 1x1 PNG. Tests use real PNG bytes rather
@@ -106,13 +108,13 @@ func TestGenaiTextImageSegmentsForwardableMIME(t *testing.T) {
 	// everything else — including the octet-stream a failed sniff leaves —
 	// is skipped instead of earning a 400 from the provider.
 	for _, mime := range []string{"image/png", "image/jpeg", "image/gif", "image/webp"} {
-		if !forwardableImageMIME(mime) {
-			t.Errorf("forwardableImageMIME(%q) = false, want true", mime)
+		if !forwardmime.ForwardableImageMIME(mime) {
+			t.Errorf("ForwardableImageMIME(%q) = false, want true", mime)
 		}
 	}
 	for _, mime := range []string{"application/octet-stream", "image/tiff", "text/plain", "", "IMAGE/PNG"} {
-		if forwardableImageMIME(mime) {
-			t.Errorf("forwardableImageMIME(%q) = true, want false", mime)
+		if forwardmime.ForwardableImageMIME(mime) {
+			t.Errorf("ForwardableImageMIME(%q) = true, want false", mime)
 		}
 	}
 
