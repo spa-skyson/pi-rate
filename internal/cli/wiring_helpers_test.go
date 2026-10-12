@@ -222,7 +222,7 @@ func TestBuildToolsets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := buildToolsets(tt.cfg); len(got) != tt.wantLen {
+			if got := buildToolsets(tt.cfg, "interactive"); len(got) != tt.wantLen {
 				t.Errorf("buildToolsets() returned %d toolsets, want %d", len(got), tt.wantLen)
 			}
 		})

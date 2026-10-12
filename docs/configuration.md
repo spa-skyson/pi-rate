@@ -391,6 +391,33 @@ Or in standalone `~/.pirate/mcp.json` (Claude Desktop compatible format):
 
 `/mcp` in the TUI lists the configured servers and their tool status.
 
+**Headless runs start no MCP servers by default.** `--mode print` and
+`--mode json` are one-shot: they pay the startup of every configured server
+per prompt, so a server is lifted only when the run names one — pass
+`--mcp <name1>,<name2>` (server names, case-insensitive) or `--mcp all` to
+restore the previous behavior; naming a server in `--tools` keeps working
+too. The `PI_MCP` environment variable has the same spelling and applies
+when the flag is unset; the flag wins. Interactive and server modes
+(`rpc`, `socket`) start every server not named out by an active `--tools`
+list.
+
+**Subagents follow the headless default.** A spawned child runs
+`--mode json`, so without an opt-in it lifts no MCP server. Give an agent
+the servers it needs with a frontmatter `mcp:` key — a comma-separated
+server list (or `all`), forwarded to the child as `PI_MCP`:
+
+```markdown
+---
+name: reviewer
+description: Reviews diffs
+mcp: serena, agentmemory
+---
+```
+
+Children of agents without `mcp:` skip MCP startup entirely, which is the
+point: a one-shot child that never calls those tools should not pay for
+them.
+
 ## Hooks, memory and other fields
 
 Every field this page does not cover — hooks (shell callbacks on tool events),

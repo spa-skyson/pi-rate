@@ -137,6 +137,7 @@ model: mycompany/model-x       # overrides role; may carry a provider prefix
 role: smol                     # config role used when model: is absent
 fallback-models: mycompany/model-x-lite, mycompany/model-x-mini
 tools: read, grep, find        # comma-separated; empty = all tools
+mcp: serena, agentmemory       # MCP servers the child starts (rides as PI_MCP)
 temperature: 0.2
 reasoningEffort: high          # none | minimal | low | medium | high | max
 steps: 150                     # tool-call iterations cap; 0 = unlimited
@@ -163,6 +164,7 @@ Frontmatter keys and their defaults:
 | `role` | config role name (`smol`, `plan`, `slow`, …) used when `model` is absent | — |
 | `fallback-models` | comma-separated models, same format as `model`, tried in order when the primary is unavailable (exhausted quota, auth errors, repeated 5xx); at most the first 3 are used | the role's `fallbackModels` (falling back to the `default` role's) |
 | `tools` | comma-separated tool names | all tools |
+| `mcp` | comma-separated MCP server names, or `all`; forwarded to the child as `PI_MCP` | none (a child is a one-shot run and lifts no MCP server) |
 | `temperature` | float | inherited |
 | `reasoningEffort` | `none`, `minimal` (same as `none`), `low`, `medium`, `high`, `max`; unknown values warn and inherit | inherited |
 | `steps` | cap on the child's tool-call iterations; `0` = unlimited | unlimited |

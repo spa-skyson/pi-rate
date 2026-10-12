@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,6 +83,7 @@ var (
 	flagWebSearch    bool
 	flagLSP          string
 	flagTools        string
+	flagMCP          string
 	flagTemperature  float64
 	flagThinking     string
 	flagSteps        int
@@ -259,6 +261,8 @@ Set a default in ~/.pirate/config.json so --model is only needed to deviate;
 		"Register the web_search tool (needs a running Ollama daemon, or OLLAMA_API_KEY). Off by default; PI_WEB_SEARCH=1 does the same, and propagates to subagents")
 	cmd.Flags().StringVar(&flagLSP, "lsp", "min", "Language-server tools: off, min (symbols+diagnostics), or full (all seven)")
 	cmd.Flags().StringVar(&flagTools, "tools", "", "Comma-separated tool names to keep (e.g. read,bash); MCP servers match by server name; default keeps all")
+	cmd.Flags().StringVar(&flagMCP, "mcp", "",
+		`MCP servers to start in print/json modes: "all", or a comma-separated server name list; default starts none in those one-shot modes. PI_MCP does the same when the flag is unset, and propagates to subagents. Interactive and server (rpc/socket) modes start every server not named out by an active --tools list`)
 	cmd.Flags().Float64Var(&flagTemperature, "temperature", 0, "LLM sampling temperature (0 keeps the provider default)")
 	cmd.Flags().StringVar(&flagThinking, "thinking", "", "Reasoning effort: none, low, medium, high, or max (overrides config thinking level)")
 	cmd.Flags().IntVar(&flagSteps, "steps", 0, "Max tool-call iterations per run (0 = no limit)")
@@ -1026,7 +1030,7 @@ func runNonInteractive(
 		return err
 	}
 
-	allToolsets := buildToolsets(cfg)
+	allToolsets := buildToolsets(cfg, mode)
 
 	loadNonInteractiveSkills(mode, cfg, cwd)
 	instruction += memoryInstructionContext(parentCtx, memStore, cfg, cwd)
@@ -1626,16 +1630,86 @@ func applyToolAllowlist(list []adktool.Tool) []adktool.Tool {
 	return kept
 }
 
+// isOneShotMode reports whether the mode runs a single prompt and exits.
+// print/json pay their whole startup cost per prompt; rpc and socket are
+// long-running servers that, like interactive, amortize it over a session.
+func isOneShotMode(mode string) bool {
+	return mode == "print" || mode == "json"
+}
+
 // mcpToolsetsForRun builds the MCP toolsets for this run. Under an active
 // --tools allow list a server is connected only when its name appears in the
 // list (case-insensitive). MCP tools sit behind the Toolset interface and
 // cannot be filtered one by one, so a server whose tools would all be
 // filtered away is not started at all; A2A and LLMS toolsets are not
-// affected by the allow list.
-func mcpToolsetsForRun(cfg config.Config) []adktool.Toolset {
-	servers := mcpServersForAllowlist(buildMCPServerConfigs(cfg), parseToolAllowlist(flagTools))
+// affected by the allow list. One-shot modes lift no server unless a flag
+// names one — see mcpServersForRun.
+func mcpToolsetsForRun(cfg config.Config, mode string) []adktool.Toolset {
+	servers := mcpServersForRun(mode, buildMCPServerConfigs(cfg))
 	ts, _ := extension.BuildMCPToolsets(servers)
 	return ts
+}
+
+// mcpFlagRequested resolves the --mcp request: the flag when set, else the
+// PI_MCP environment variable (same spelling, lower precedence). The env
+// fallback is how a spawned child — a plain `pirate --mode json` process —
+// receives the parent agent's frontmatter `mcp:` list without another
+// command-line flag to forward (issue #68).
+func mcpFlagRequested() string {
+	if flagMCP != "" {
+		return flagMCP
+	}
+	return os.Getenv(config.EnvMCP)
+}
+
+// mcpServersForRun picks the servers one run connects, by mode and flags.
+// Long-running modes (interactive, rpc, socket) keep the existing posture:
+// every configured server, narrowed by an active --tools list. One-shot
+// modes (print, json) start none by default — a single prompt pays the
+// startup of every server it never calls (~2.6s per spawn, measured in
+// issue #68) — so a server is lifted only when a flag names it: --tools
+// matching a server name, or --mcp / PI_MCP ("all" or a comma-separated
+// name list, case-insensitive; the flag wins over the env var). Unknown
+// --mcp names warn rather than start nothing silently. Pure in the server
+// list, so the choice is testable without constructing toolsets.
+func mcpServersForRun(mode string, servers []extension.MCPServerConfig) []extension.MCPServerConfig {
+	allow := parseToolAllowlist(flagTools)
+	if !isOneShotMode(mode) {
+		return mcpServersForAllowlist(servers, allow)
+	}
+	requested := parseToolAllowlist(mcpFlagRequested())
+	if len(requested) > 0 {
+		warnUnknownMCPServers(requested, servers)
+	}
+	switch {
+	case slices.Contains(requested, "all"):
+		// --mcp all restores the previous posture; --tools still narrows on
+		// top (an empty allow list means "keep everything" downstream).
+	case len(requested) > 0:
+		allow = append(allow, requested...)
+	case len(allow) == 0:
+		return nil
+	}
+	return mcpServersForAllowlist(servers, allow)
+}
+
+// warnUnknownMCPServers reports --mcp names matching no configured server,
+// so a typo does not silently run MCP-less.
+func warnUnknownMCPServers(requested []string, servers []extension.MCPServerConfig) {
+	configured := make(map[string]bool, len(servers))
+	for _, s := range servers {
+		configured[strings.ToLower(s.Name)] = true
+	}
+	var unknown []string
+	for _, n := range requested {
+		if n != "all" && !configured[n] {
+			unknown = append(unknown, n)
+		}
+	}
+	if len(unknown) > 0 {
+		fmt.Fprintf(os.Stderr, "pirate: warning: --mcp %s matched no configured server\n",
+			strings.Join(unknown, ", "))
+	}
 }
 
 // mcpServersForAllowlist keeps only the servers whose name appears in allow,
@@ -1783,11 +1857,12 @@ func memoryObservationCallback(worker *memory.Worker, cfg config.Config, project
 }
 
 // buildToolsets assembles the external toolsets — MCP servers and A2A agents —
-// configured for this run. MCP servers are filtered by an active --tools allow
-// list (see mcpToolsetsForRun); A2A and LLMS toolsets are not affected by it.
-func buildToolsets(cfg config.Config) []adktool.Toolset {
+// configured for this run. MCP servers are filtered by mode and the
+// --tools/--mcp flags (see mcpToolsetsForRun); A2A and LLMS toolsets are not
+// affected by them.
+func buildToolsets(cfg config.Config, mode string) []adktool.Toolset {
 	var toolsets []adktool.Toolset
-	if ts := mcpToolsetsForRun(cfg); len(ts) > 0 {
+	if ts := mcpToolsetsForRun(cfg, mode); len(ts) > 0 {
 		toolsets = append(toolsets, ts...)
 	}
 	if cfg.A2A != nil && len(cfg.A2A.Agents) > 0 {

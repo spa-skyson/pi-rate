@@ -29,6 +29,12 @@ const DefaultStreamIdleTimeout = 90 * time.Second
 // `streamIdleTimeout:` to the child process; "0" disables the idle abort.
 const EnvStreamIdleTimeoutMS = "PI_STREAM_IDLE_TIMEOUT_MS"
 
+// EnvMCP names the MCP servers a one-shot run starts, with the same spelling
+// as the --mcp flag ("all" or a comma-separated server list) and lower
+// precedence — an explicit --mcp wins. A subagent parent uses it to hand an
+// agent's frontmatter `mcp:` to the child process (issue #68).
+const EnvMCP = "PI_MCP"
+
 // DefaultMidTurnAttempts is the total number of times a turn may run when a
 // transient failure cuts it short mid-reply: the first attempt plus two
 // replays, the behavior #41 shipped with.

@@ -91,6 +91,12 @@ type AgentConfig struct {
 	// is the silence budget. A pointer because "unset" and "explicitly 0"
 	// must reach the child differently.
 	StreamIdleTimeout *int
+	// MCP holds the frontmatter `mcp:` server names, handed to the child as
+	// PI_MCP (issue #68): the child is a one-shot json run and lifts no MCP
+	// server unless the run names one. Empty means no PI_MCP — the child
+	// starts none unless its own --mcp or PI_MCP says otherwise; the special
+	// name "all" restores every configured server.
+	MCP []string
 	// Steps caps the child's tool-call iterations (0 = no limit).
 	Steps int
 	// Permission holds the agent's frontmatter `permission:` rules. They gate
@@ -133,6 +139,7 @@ type AgentDiscoveryResult struct {
 // fallback-models: openai/gpt-5.6-sol, anthropic/claude-sonnet-4-6
 // worktree: false
 // tools: read, write, edit
+// mcp: serena, agentmemory
 // temperature: 0.3
 // reasoningEffort: high
 // streamIdleTimeout: 90s
@@ -148,7 +155,10 @@ type AgentDiscoveryResult struct {
 // models tried in order when the primary one is unavailable. `temperature:`,
 // `reasoningEffort:` and `steps:`
 // tune the child's sampling and iteration budget; unusable values warn and
-// leave the field at its zero value (= inherit / unlimited). `timeout:` is
+// leave the field at its zero value (= inherit / unlimited). `mcp:` is a
+// comma-separated list of MCP server names (or "all") that rides to the
+// child as PI_MCP: a child is a one-shot run and lifts no MCP server unless
+// the run names one. `timeout:` is
 // milliseconds by default and also takes unit suffixes — 30m, 1h, 90s,
 // 500ms; a value resolving to under a second warns and falls back to the
 // default. `streamIdleTimeout:` takes the same spellings and rides to the
@@ -252,6 +262,8 @@ func applyAgentFrontmatterKey(cfg *AgentConfig, key, value string) {
 		cfg.LSP = strings.ToLower(strings.TrimSpace(value))
 	case "tools":
 		cfg.Tools = append(cfg.Tools, parseAgentToolList(value)...)
+	case "mcp":
+		cfg.MCP = parseAgentMCPList(cfg.Name, value)
 	case "temperature":
 		if t, ok := parseAgentTemperature(cfg.Name, value); ok {
 			cfg.Temperature = t
@@ -530,6 +542,26 @@ func NormalizeReasoningEffort(value string) string {
 			"reasoningEffort", value, "known", "none, minimal, low, medium, high, max")
 		return ""
 	}
+}
+
+// parseAgentMCPList splits a frontmatter `mcp:` value into lowercase server
+// names — the spelling the child's PI_MCP resolution matches on; "all" keeps
+// its special meaning of "every configured server". A value that leaves no
+// usable name warns and returns nil, so the child keeps the one-shot default
+// instead of a silently empty request.
+func parseAgentMCPList(agentName, value string) []string {
+	var names []string
+	for _, n := range strings.Split(value, ",") {
+		if n = strings.ToLower(strings.TrimSpace(n)); n != "" {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		slog.Warn("subagent: mcp: names no server; ignoring",
+			"agent", agentName, "value", value)
+		return nil
+	}
+	return names
 }
 
 // parseAgentToolList splits a comma-separated frontmatter `tools:` value,

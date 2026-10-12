@@ -131,3 +131,18 @@ func TestDefaultEnvAllowlist(t *testing.T) {
 		}
 	})
 }
+
+// A spawn env entry must replace the inherited variable of the same name,
+// not race it as a duplicate: baseEnv carries every allowlisted PI_* var the
+// parent had, and getenv resolves duplicates by order. This is what lets an
+// agent's frontmatter `mcp:` (PI_MCP) beat the parent's own value.
+func TestOverrideEnv(t *testing.T) {
+	base := []string{"A=1", "PI_MCP=all", "B=2"}
+	overrides := []string{"PI_MCP=serena", "C=3"}
+
+	got := overrideEnv(base, overrides)
+	want := []string{"A=1", "B=2"}
+	if !slices.Equal(got, want) {
+		t.Errorf("overrideEnv() = %v, want %v (PI_MCP dropped, rest kept)", got, want)
+	}
+}

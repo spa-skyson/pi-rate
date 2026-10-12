@@ -137,22 +137,186 @@ func TestMCPToolsetsForRun(t *testing.T) {
 
 	t.Run("no allow builds every configured server", func(t *testing.T) {
 		withToolFlag(t, "")
-		if got := mcpToolsetsForRun(cfg); len(got) != 2 {
+		if got := mcpToolsetsForRun(cfg, "interactive"); len(got) != 2 {
 			t.Errorf("got %d toolsets, want 2", len(got))
 		}
 	})
 
 	t.Run("allow narrows to the named server", func(t *testing.T) {
 		withToolFlag(t, "alpha")
-		if got := mcpToolsetsForRun(cfg); len(got) != 1 {
+		if got := mcpToolsetsForRun(cfg, "interactive"); len(got) != 1 {
 			t.Errorf("got %d toolsets, want 1", len(got))
 		}
 	})
 
 	t.Run("allow matching nothing builds none", func(t *testing.T) {
 		withToolFlag(t, "zzz")
-		if got := mcpToolsetsForRun(cfg); len(got) != 0 {
+		if got := mcpToolsetsForRun(cfg, "interactive"); len(got) != 0 {
 			t.Errorf("got %d toolsets, want 0", len(got))
+		}
+	})
+
+	t.Run("one-shot default builds none", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "")
+		for _, mode := range []string{"print", "json"} {
+			if got := mcpToolsetsForRun(cfg, mode); len(got) != 0 {
+				t.Errorf("%s: got %d toolsets, want 0", mode, len(got))
+			}
+		}
+	})
+
+	t.Run("one-shot --mcp opts back in", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "all")
+		if got := mcpToolsetsForRun(cfg, "print"); len(got) != 2 {
+			t.Errorf("got %d toolsets, want 2", len(got))
+		}
+	})
+}
+
+// withMCPFlag sets the --mcp flag for the duration of one test. Like
+// withToolFlag, the flag is a package global, so these tests must not run in
+// parallel.
+func withMCPFlag(t *testing.T, v string) {
+	t.Helper()
+	orig := flagMCP
+	t.Cleanup(func() { flagMCP = orig })
+	flagMCP = v
+}
+
+// TestMCPServersForRun pins the per-mode MCP posture: long-running modes
+// (interactive, and the TUI's deferred phase 2 with it) keep every configured
+// server; one-shot modes (print/json) lift none unless a flag names one.
+func TestMCPServersForRun(t *testing.T) {
+	servers := []extension.MCPServerConfig{
+		{Name: "alpha", Command: "cmd-a"},
+		{Name: "Beta", Command: "cmd-b"},
+	}
+
+	names := func(got []extension.MCPServerConfig) []string {
+		out := make([]string, len(got))
+		for i, s := range got {
+			out[i] = s.Name
+		}
+		return out
+	}
+
+	t.Run("long-running modes keep every server and ignore --mcp", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "alpha")
+		for _, mode := range []string{"interactive", "rpc", "socket"} {
+			if got := mcpServersForRun(mode, servers); !reflect.DeepEqual(got, servers) {
+				t.Errorf("%s: got %v, want every server", mode, names(got))
+			}
+		}
+	})
+
+	t.Run("long-running --tools narrowing is unchanged", func(t *testing.T) {
+		withToolFlag(t, "beta")
+		withMCPFlag(t, "")
+		got := mcpServersForRun("interactive", servers)
+		if want := []string{"Beta"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("one-shot default starts none", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "")
+		for _, mode := range []string{"print", "json"} {
+			if got := mcpServersForRun(mode, servers); len(got) != 0 {
+				t.Errorf("%s: got %v, want none", mode, names(got))
+			}
+		}
+	})
+
+	t.Run("one-shot --tools without server names still starts none", func(t *testing.T) {
+		withToolFlag(t, "read,bash")
+		withMCPFlag(t, "")
+		if got := mcpServersForRun("print", servers); len(got) != 0 {
+			t.Errorf("got %v, want none", names(got))
+		}
+	})
+
+	t.Run("one-shot --tools server name keeps the old escape hatch", func(t *testing.T) {
+		withToolFlag(t, "beta")
+		withMCPFlag(t, "")
+		got := mcpServersForRun("json", servers)
+		if want := []string{"Beta"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("one-shot --mcp names servers case-insensitively", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "ALPHA, beta")
+		got := mcpServersForRun("print", servers)
+		if want := []string{"alpha", "Beta"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("one-shot --mcp all starts every server", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "all")
+		if got := mcpServersForRun("print", servers); !reflect.DeepEqual(got, servers) {
+			t.Errorf("got %v, want every server", names(got))
+		}
+	})
+
+	t.Run("one-shot --mcp all still yields to --tools", func(t *testing.T) {
+		withToolFlag(t, "alpha")
+		withMCPFlag(t, "all")
+		got := mcpServersForRun("print", servers)
+		if want := []string{"alpha"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("unknown --mcp names warn but keep the rest", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "alpha, nope")
+		var got []extension.MCPServerConfig
+		stderr := captureStderr(t, func() { got = mcpServersForRun("print", servers) })
+		if want := []string{"alpha"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("kept %v, want %v", names(got), want)
+		}
+		if !strings.Contains(stderr, "nope") || !strings.Contains(stderr, "matched no configured server") {
+			t.Errorf("stderr %q lacks the unknown-server warning", stderr)
+		}
+	})
+
+	t.Run("PI_MCP env opts in when the flag is unset", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "")
+		t.Setenv(config.EnvMCP, "alpha")
+		got := mcpServersForRun("json", servers)
+		if want := []string{"alpha"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("explicit --mcp wins over PI_MCP", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "beta")
+		t.Setenv(config.EnvMCP, "alpha")
+		got := mcpServersForRun("print", servers)
+		if want := []string{"Beta"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("interactive ignores --mcp and writes no warning", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "nope")
+		var got []extension.MCPServerConfig
+		stderr := captureStderr(t, func() { got = mcpServersForRun("interactive", servers) })
+		if len(got) != len(servers) {
+			t.Errorf("got %v, want every server", names(got))
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want empty (the TUI path never warns)", stderr)
 		}
 	})
 }

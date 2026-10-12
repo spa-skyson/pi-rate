@@ -386,6 +386,19 @@ func streamIdleEnv(agent AgentConfig) []string {
 	return []string{fmt.Sprintf("%s=%d", config.EnvStreamIdleTimeoutMS, *agent.StreamIdleTimeout)}
 }
 
+// mcpEnv renders an agent's frontmatter `mcp:` as the child env override the
+// CLI reads (config.EnvMCP, the --mcp fallback). Empty frontmatter renders
+// nothing — the child keeps the one-shot default of lifting no MCP server
+// (issue #68) unless its own flags or environment name one. buildCommand
+// lets this entry override an inherited PI_MCP rather than race it as a
+// duplicate.
+func mcpEnv(agent AgentConfig) []string {
+	if len(agent.MCP) == 0 {
+		return nil
+	}
+	return []string{config.EnvMCP + "=" + strings.Join(agent.MCP, ",")}
+}
+
 // streamStart is the synchronous handshake of SpawnWithInputFallback: the
 // first attempt that produced a live event stream, or the failure when no
 // attempt ever did.
@@ -885,6 +898,11 @@ func (o *Orchestrator) Spawn(ctx context.Context, input SpawnInput) (<-chan Even
 	// LLM streams and the child is a separate pi process that never sees
 	// this agent's frontmatter.
 	spawnOpts.Env = append(spawnOpts.Env, streamIdleEnv(agent)...)
+
+	// The child's MCP servers: same ride, same reason (issue #68). A child
+	// is a one-shot json run and lifts no MCP server by default; the agent's
+	// frontmatter `mcp:` names the ones it instructs the model to use.
+	spawnOpts.Env = append(spawnOpts.Env, mcpEnv(agent)...)
 
 	proc, err := o.dispatchSpawn(ctx, spawnOpts, agent.Name)
 	if err != nil {

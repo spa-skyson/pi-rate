@@ -3,6 +3,7 @@ package subagent
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/spa-skyson/pi-rate/internal/testenv"
@@ -458,6 +459,75 @@ streamIdleTimeout: 300
 Body.`)
 		if agent.StreamIdleTimeout != nil {
 			t.Errorf("StreamIdleTimeout = %v, want nil (300ms is a seconds typo)", *agent.StreamIdleTimeout)
+		}
+	})
+}
+
+func TestParseAgentFile_WithMCP(t *testing.T) {
+	tmpDir := t.TempDir()
+	write := func(t *testing.T, body string) AgentConfig {
+		t.Helper()
+		path := filepath.Join(tmpDir, "mcp.md")
+		if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		agent, err := ParseAgentFile(path)
+		if err != nil {
+			t.Fatalf("ParseAgentFile failed: %v", err)
+		}
+		return agent
+	}
+
+	t.Run("names normalize to lowercase", func(t *testing.T) {
+		agent := write(t, `---
+name: mcp-agent
+description: Agent that wants MCP servers
+role: smol
+mcp: Serena, agentmemory
+---
+Body.`)
+		want := []string{"serena", "agentmemory"}
+		if !reflect.DeepEqual(agent.MCP, want) {
+			t.Errorf("MCP = %v, want %v", agent.MCP, want)
+		}
+	})
+
+	t.Run("all keeps its special meaning", func(t *testing.T) {
+		agent := write(t, `---
+name: mcp-agent
+description: Agent that wants every MCP server
+role: smol
+mcp: All
+---
+Body.`)
+		want := []string{"all"}
+		if !reflect.DeepEqual(agent.MCP, want) {
+			t.Errorf("MCP = %v, want %v", agent.MCP, want)
+		}
+	})
+
+	t.Run("absent inherits", func(t *testing.T) {
+		agent := write(t, `---
+name: mcp-agent
+description: Agent without the key
+role: smol
+---
+Body.`)
+		if agent.MCP != nil {
+			t.Errorf("MCP = %v, want nil (inherit)", agent.MCP)
+		}
+	})
+
+	t.Run("value naming nothing is ignored", func(t *testing.T) {
+		agent := write(t, `---
+name: mcp-agent
+description: Agent with an empty mcp list
+role: smol
+mcp: , ,
+---
+Body.`)
+		if agent.MCP != nil {
+			t.Errorf("MCP = %v, want nil (nothing usable)", agent.MCP)
 		}
 	})
 }
