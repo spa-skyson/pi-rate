@@ -286,4 +286,37 @@ func TestMCPServersForRun(t *testing.T) {
 			t.Errorf("stderr %q lacks the unknown-server warning", stderr)
 		}
 	})
+
+	t.Run("PI_MCP env opts in when the flag is unset", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "")
+		t.Setenv(config.EnvMCP, "alpha")
+		got := mcpServersForRun("json", servers)
+		if want := []string{"alpha"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("explicit --mcp wins over PI_MCP", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "beta")
+		t.Setenv(config.EnvMCP, "alpha")
+		got := mcpServersForRun("print", servers)
+		if want := []string{"Beta"}; !reflect.DeepEqual(names(got), want) {
+			t.Errorf("got %v, want %v", names(got), want)
+		}
+	})
+
+	t.Run("interactive ignores --mcp and writes no warning", func(t *testing.T) {
+		withToolFlag(t, "")
+		withMCPFlag(t, "nope")
+		var got []extension.MCPServerConfig
+		stderr := captureStderr(t, func() { got = mcpServersForRun("interactive", servers) })
+		if len(got) != len(servers) {
+			t.Errorf("got %v, want every server", names(got))
+		}
+		if stderr != "" {
+			t.Errorf("stderr = %q, want empty (the TUI path never warns)", stderr)
+		}
+	})
 }

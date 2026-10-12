@@ -752,4 +752,20 @@ func TestStreamIdleEnv(t *testing.T) {
 	}
 }
 
+// The frontmatter `mcp:` must reach the child as PI_MCP, in the spelling the
+// child's --mcp fallback resolves; absence must render as no env at all, so
+// the child keeps the one-shot default of lifting no MCP server (issue #68).
+func TestMCPSpawnEnv(t *testing.T) {
+	inherit := AgentConfig{Name: "a"}
+	if got := mcpEnv(inherit); got != nil {
+		t.Errorf("mcpEnv(unset) = %v, want nil", got)
+	}
+
+	want := config.EnvMCP + "=serena,agentmemory"
+	named := AgentConfig{Name: "a", MCP: []string{"serena", "agentmemory"}}
+	if got := mcpEnv(named); len(got) != 1 || got[0] != want {
+		t.Errorf("mcpEnv(serena,agentmemory) = %v, want [%s]", got, want)
+	}
+}
+
 func intPtr(v int) *int { return &v }

@@ -223,7 +223,7 @@ func (s *Spawner) buildCommand(procCtx context.Context, opts SpawnOpts) *exec.Cm
 	// see ChildEnv.
 	baseEnv := ChildEnv(ConcurrencyFromEnv())
 	if len(opts.Env) > 0 {
-		cmd.Env = append(baseEnv, opts.Env...)
+		cmd.Env = append(overrideEnv(baseEnv, opts.Env), opts.Env...)
 	} else {
 		cmd.Env = baseEnv
 	}
@@ -235,6 +235,30 @@ func (s *Spawner) buildCommand(procCtx context.Context, opts SpawnOpts) *exec.Cm
 		cmd.Dir = opts.WorkDir
 	}
 	return cmd
+}
+
+// overrideEnv drops from base the entries whose name also appears in
+// overrides, so a spawn env var replaces the inherited one instead of
+// racing it as a duplicate: the base carries every allowlisted PI_* variable
+// the parent had, and the child's getenv resolves duplicates by order — the
+// inherited copy can win. This is how an agent's frontmatter `mcp:` (or a
+// permission blob, or a stream-idle budget) beats the parent's own value of
+// the same variable.
+func overrideEnv(base, overrides []string) []string {
+	names := make(map[string]bool, len(overrides))
+	for _, e := range overrides {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			names[k] = true
+		}
+	}
+	out := make([]string, 0, len(base))
+	for _, e := range base {
+		if k, _, ok := strings.Cut(e, "="); ok && names[k] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // startChildProcess opens all three pipes and starts cmd. The pipes must be

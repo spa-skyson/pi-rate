@@ -262,7 +262,7 @@ Set a default in ~/.pirate/config.json so --model is only needed to deviate;
 	cmd.Flags().StringVar(&flagLSP, "lsp", "min", "Language-server tools: off, min (symbols+diagnostics), or full (all seven)")
 	cmd.Flags().StringVar(&flagTools, "tools", "", "Comma-separated tool names to keep (e.g. read,bash); MCP servers match by server name; default keeps all")
 	cmd.Flags().StringVar(&flagMCP, "mcp", "",
-		`MCP servers to start in print/json modes: "all", or a comma-separated server name list; default starts none in those one-shot modes. Interactive and server (rpc/socket) modes always start every configured server`)
+		`MCP servers to start in print/json modes: "all", or a comma-separated server name list; default starts none in those one-shot modes. PI_MCP does the same when the flag is unset, and propagates to subagents. Interactive and server (rpc/socket) modes start every server not named out by an active --tools list`)
 	cmd.Flags().Float64Var(&flagTemperature, "temperature", 0, "LLM sampling temperature (0 keeps the provider default)")
 	cmd.Flags().StringVar(&flagThinking, "thinking", "", "Reasoning effort: none, low, medium, high, or max (overrides config thinking level)")
 	cmd.Flags().IntVar(&flagSteps, "steps", 0, "Max tool-call iterations per run (0 = no limit)")
@@ -1650,22 +1650,34 @@ func mcpToolsetsForRun(cfg config.Config, mode string) []adktool.Toolset {
 	return ts
 }
 
+// mcpFlagRequested resolves the --mcp request: the flag when set, else the
+// PI_MCP environment variable (same spelling, lower precedence). The env
+// fallback is how a spawned child — a plain `pirate --mode json` process —
+// receives the parent agent's frontmatter `mcp:` list without another
+// command-line flag to forward (issue #68).
+func mcpFlagRequested() string {
+	if flagMCP != "" {
+		return flagMCP
+	}
+	return os.Getenv(config.EnvMCP)
+}
+
 // mcpServersForRun picks the servers one run connects, by mode and flags.
 // Long-running modes (interactive, rpc, socket) keep the existing posture:
 // every configured server, narrowed by an active --tools list. One-shot
 // modes (print, json) start none by default — a single prompt pays the
-// startup of every server it never calls (~2.6s per spawn measured,
+// startup of every server it never calls (~2.6s per spawn, measured in
 // issue #68) — so a server is lifted only when a flag names it: --tools
-// matching a server name, or --mcp ("all" or a comma-separated name list,
-// case-insensitive). Unknown --mcp names warn rather than start nothing
-// silently. Pure in the server list, so the choice is testable without
-// constructing toolsets.
+// matching a server name, or --mcp / PI_MCP ("all" or a comma-separated
+// name list, case-insensitive; the flag wins over the env var). Unknown
+// --mcp names warn rather than start nothing silently. Pure in the server
+// list, so the choice is testable without constructing toolsets.
 func mcpServersForRun(mode string, servers []extension.MCPServerConfig) []extension.MCPServerConfig {
 	allow := parseToolAllowlist(flagTools)
 	if !isOneShotMode(mode) {
 		return mcpServersForAllowlist(servers, allow)
 	}
-	requested := parseToolAllowlist(flagMCP)
+	requested := parseToolAllowlist(mcpFlagRequested())
 	if len(requested) > 0 {
 		warnUnknownMCPServers(requested, servers)
 	}
