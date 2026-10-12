@@ -761,7 +761,10 @@ func runDeferredInitPhase2(ctx context.Context, cfg config.Config, cwd string, s
 			return
 		}
 		send("mcp", false)
-		ts := mcpToolsetsForRun(cfg)
+		// "interactive" — this is the TUI's deferred phase 2, the one path
+		// where MCP startup behavior is pinned to the pre-one-shot posture:
+		// every configured server, --tools narrowing only (issue #68).
+		ts := mcpToolsetsForRun(cfg, "interactive")
 		ps.mu.Lock()
 		ps.mcpToolsets = ts
 		ps.mu.Unlock()

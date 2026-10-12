@@ -391,6 +391,14 @@ Or in standalone `~/.pirate/mcp.json` (Claude Desktop compatible format):
 
 `/mcp` in the TUI lists the configured servers and their tool status.
 
+**Headless runs start no MCP servers by default.** `--mode print` and
+`--mode json` are one-shot: they pay the startup of every configured server
+per prompt, so a server is lifted only when the run names one — pass
+`--mcp <name1>,<name2>` (server names, case-insensitive) or `--mcp all` to
+restore the previous behavior; naming a server in `--tools` keeps working
+too. Interactive and server modes (`rpc`, `socket`) always start every
+configured server.
+
 ## Hooks, memory and other fields
 
 Every field this page does not cover — hooks (shell callbacks on tool events),
