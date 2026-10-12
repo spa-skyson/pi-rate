@@ -174,9 +174,11 @@ func serveCompleteKeepAlive(conn net.Conn, body string) {
 // 6× the largest budget the test can derive (10s, see the calibration) —
 // so a working abort always wins the race, and only a broken abort path
 // makes the test wait it out. The value deliberately does NOT travel through
-// the handler closure: the hijacked connection's goroutine would read it
-// before the test writes the derived value (a stale zero closed the socket
-// mid-zombie and the abort never fired — issue #72 stress run).
+// the handler closure: with the calibration currently above the server
+// creation a closure would be safe, but nothing pins that order — moved
+// below, the derived write would race the server goroutines reading it (a
+// stale zero closed the socket mid-zombie and the abort never fired —
+// issue #72 stress run).
 func holdSilent(conn net.Conn, prelude string) {
 	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n%s", prelude)
 	gone := make(chan struct{})
@@ -423,6 +425,11 @@ func TestCloseIdleConnectionsClearsClientPool(t *testing.T) {
 			_ = resp.Body.Close()
 		}
 	}()
+	// One bound for every scheduler-ordering wait in this test: each covers
+	// an in-process event that costs milliseconds locally, so 5s is ~100×
+	// the cost, absorbs a loaded runner's stalls, and still fails a
+	// genuinely broken pool in seconds.
+	const waitBound = 5 * time.Second
 	resp, err := client.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
@@ -432,8 +439,7 @@ func TestCloseIdleConnectionsClearsClientPool(t *testing.T) {
 	// count is waited for, not asserted the instant the ok GET returns: the
 	// 2026-10-13 CI run failed this test in 0.05s on exactly that ordering
 	// (issue #72, the same runner-noise class the #61 scaling absorbed).
-	// 5s is ~100× the local cost and still bounded.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitBound)
 	for dials.Load() != 2 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
@@ -446,8 +452,8 @@ func TestCloseIdleConnectionsClearsClientPool(t *testing.T) {
 	// way.
 	select {
 	case <-silentDone:
-	case <-time.After(5 * time.Second):
-		t.Logf("silent request did not finish client-side within 5s; continuing — its connection is active, not pooled")
+	case <-time.After(waitBound):
+		t.Logf("silent request did not finish client-side within %v; continuing — its connection is active, not pooled", waitBound)
 	}
 
 	// The pool must be empty now: the next request dials a third connection.
@@ -458,7 +464,7 @@ func TestCloseIdleConnectionsClearsClientPool(t *testing.T) {
 	// assertion (issue #72). Each attempt closes again and rechecks: a late
 	// park is caught by the next close, and every attempt asserts the
 	// property under test — a close makes the next request dial fresh.
-	deadline = time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(waitBound)
 	for dials.Load() != 3 && time.Now().Before(deadline) {
 		client.CloseIdleConnections()
 		resp, err = client.Get(srv.URL + "/")
