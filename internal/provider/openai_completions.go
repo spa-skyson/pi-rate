@@ -445,10 +445,14 @@ func oaiRunStreamingExtract(ctx context.Context, client *openai.Client, params o
 // oaiExtractHooks collects the escape hatches a provider needs when it puts
 // data where the openai-go SDK has no field for it. Every hook is optional.
 type oaiExtractHooks struct {
-	// deltaThinking pulls reasoning text out of one streaming chunk's raw JSON.
+	// deltaThinking pulls reasoning text out of one streaming chunk's raw
+	// JSON. On the streaming path the field is never nil: oaiRunStreamingHooks
+	// installs the default (oaiDeltaReasoningContent, reading the standard
+	// delta.reasoning_content field) when the provider did not bring its own,
+	// so an installed extractor owns reasoning extraction exclusively.
 	deltaThinking func(rawChunk string) string
 	// messageThinking pulls reasoning text out of a non-streaming completion's
-	// raw JSON.
+	// raw JSON. nil means the completion carries nothing to extract.
 	messageThinking func(rawResponse string) string
 	// answerText rewrites the content string the SDK decoded before it is
 	// treated as answer text. Mistral reasoning models send content as a JSON
@@ -501,7 +505,7 @@ func oaiRunStreamingHooks(ctx context.Context, client *openai.Client, params ope
 			state.completionTokens = chunk.Usage.CompletionTokens
 			state.cachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
 		}
-		if hooks.deltaThinking != nil && len(chunk.Choices) > 0 {
+		if len(chunk.Choices) > 0 {
 			if think := hooks.deltaThinking(chunk.RawJSON()); think != "" {
 				state.thinking += think
 				if !yield(&model.LLMResponse{
@@ -586,6 +590,12 @@ func oaiRunNonStreamingExtract(ctx context.Context, client *openai.Client, param
 
 // oaiRunNonStreamingHooks is oaiRunNonStreaming with the full set of provider
 // hooks (see oaiExtractHooks). The reasoning is prepended to the response parts.
+//
+// Unlike the streaming path, this one has no default reasoning extractor: a
+// completion whose thinking arrives in message.reasoning_content is decoded
+// only by a provider that installs messageThinking for it. The asymmetry is a
+// known limitation — the reason the streaming path got its default is the
+// idle watcher, which does not apply here.
 func oaiRunNonStreamingHooks(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool, hooks oaiExtractHooks) {
 	completion, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {
