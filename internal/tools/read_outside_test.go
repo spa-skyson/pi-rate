@@ -39,17 +39,21 @@ func TestReadHandler_AbsolutePathOutsideRoot(t *testing.T) {
 	}
 }
 
-// TestReadHandler_ProcFdStillBlocked pins the device block-list: a
-// /proc/<pid>/fd/* read is refused before any I/O, sandbox or not.
+// TestReadHandler_ProcFdStillBlocked pins the device block-list: fd-backed
+// paths are refused before any I/O, sandbox or not. Covers both spellings
+// of the procfs form and the /dev/fd alias.
 func TestReadHandler_ProcFdStillBlocked(t *testing.T) {
 	sb := testSandbox(t, t.TempDir())
 
-	_, err := readHandler(sb, ReadInput{FilePath: "/proc/1/fd/1"})
-	if err == nil {
-		t.Fatal("expected /proc/1/fd/1 read to be refused")
-	}
-	if !strings.Contains(err.Error(), "device file") {
-		t.Errorf("err = %v, want the device-file refusal", err)
+	for _, path := range []string{"/proc/1/fd/1", "/proc/self/fd/1", "/dev/fd/1"} {
+		_, err := readHandler(sb, ReadInput{FilePath: path})
+		if err == nil {
+			t.Errorf("%s: expected the read to be refused", path)
+			continue
+		}
+		if !strings.Contains(err.Error(), "device file") {
+			t.Errorf("%s: err = %v, want the device-file refusal", path, err)
+		}
 	}
 }
 

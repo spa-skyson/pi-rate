@@ -109,7 +109,7 @@ func newReadImageTool(sb *Sandbox) (tool.Tool, error) {
 
 Use this after a screenshot has been saved to disk, or to inspect a remote image by URL.
 
-Required: file_path — either an absolute/sandbox-relative path to a local image, or an https:// URL to a remote image.
+Required: file_path — either an absolute/sandbox-relative path to a local image, or an https:// URL to a remote image. Absolute paths outside the working directory are allowed.
 
 URL fetching is gated by a conservative egress policy: only https, only public hosts. http://, loopback, private networks, link-local, and multicast destinations are all rejected.`, func(_ agent.Context, input ReadImageInput) (ReadImageOutput, error) {
 		return readImageHandler(sb, input)

@@ -275,6 +275,43 @@ func TestReadImagePartsForwardableMIME(t *testing.T) {
 	})
 }
 
+// TestReadImagePartsOutsideSandbox pins the injector end of issue #69: the
+// read_image handler accepts an absolute path outside the sandbox root, so
+// the injector must read it back too. A handler success whose bytes never
+// reach the prompt would leave the model believing it has seen the image.
+func TestReadImagePartsOutsideSandbox(t *testing.T) {
+	sb := newTestSandbox(t)
+
+	// The image lives in a second temp dir, never inside the sandbox root.
+	outside := filepath.Join(t.TempDir(), "shot.png")
+	writePNG(t, outside)
+	want, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cb := BuildReadImageCallback(sb, "gemini")
+	req := imageReadCallbackRequest(outside)
+	if _, err := cb(&mockReadonlyContext{}, req); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+
+	parts := req.Contents[0].Parts
+	if len(parts) != 2 {
+		t.Fatalf("got %d parts, want 2 (function response + injected image)", len(parts))
+	}
+	inline := parts[1].InlineData
+	if inline == nil {
+		t.Fatalf("part 1 is not InlineData: %+v", parts[1])
+	}
+	if inline.MIMEType != "image/png" {
+		t.Errorf("MIMEType = %q, want image/png", inline.MIMEType)
+	}
+	if !bytes.Equal(inline.Data, want) {
+		t.Errorf("injected bytes differ from the file on disk (%d vs %d bytes)", len(inline.Data), len(want))
+	}
+}
+
 func TestBuildReadImageCallback(t *testing.T) {
 	sb := newTestSandbox(t)
 	path := filepath.Join(sb.Dir(), "shot.png")

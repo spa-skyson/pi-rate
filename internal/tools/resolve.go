@@ -46,6 +46,12 @@ func isBlockedPath(path string) bool {
 	if strings.HasPrefix(clean, "/proc/") && strings.Contains(clean, "/fd/") {
 		return true
 	}
+	// /dev/fd/* is /proc/self/fd/* by another name — a symlink to it on
+	// Linux, with /dev/fd/1 ≡ /dev/stdout — so it is the same hazard and
+	// blocked for the same reason.
+	if strings.HasPrefix(clean, "/dev/fd/") {
+		return true
+	}
 	return false
 }
 

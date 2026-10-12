@@ -31,6 +31,22 @@ func writeTestPNG(t *testing.T, path string) {
 	}
 }
 
+// TestReadImageHandler_DeviceFileStillBlocked pins the fallback guard
+// itself: read_image never passes through resolveReadPath's device
+// pre-check, so its refusal must come from outsideAbs inside the Anywhere
+// fallback — blocked before any I/O.
+func TestReadImageHandler_DeviceFileStillBlocked(t *testing.T) {
+	sb := testSandbox(t, t.TempDir())
+
+	_, err := readImageHandler(sb, ReadImageInput{FilePath: "/dev/zero"})
+	if err == nil {
+		t.Fatal("expected /dev/zero read to be refused")
+	}
+	if !strings.Contains(err.Error(), "device file") {
+		t.Errorf("err = %v, want the device-file refusal", err)
+	}
+}
+
 func TestReadImageHandler(t *testing.T) {
 	dir := t.TempDir()
 	sb := testSandbox(t, dir)

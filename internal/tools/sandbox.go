@@ -325,6 +325,13 @@ func readFileRoot(root *os.Root, rel string) ([]byte, error) {
 // ".."-escapes, surface the strict Resolve error unchanged. Device files
 // stay blocked via isBlockedPath. grep/find/tree are not extended: they walk
 // the sandbox FS, and searching an arbitrary root is a different mechanism.
+//
+// SCOPE NOTE: this widens read-only subagent sandboxes too — a subagent
+// without bash can now read anywhere, including ~/.pirate/config.json,
+// .env and session logs that the sandbox refusal used to shield from
+// read-out exfiltration. Kept permissive for every caller in this MR by
+// decision; the risk is recorded in the MR description, and a gate flag
+// (AllowOutsideReads for subagent sandboxes) is tracked in issue #71.
 
 // outsideAbs returns the absolute path the read-only fallback may touch.
 // An empty path with a nil error means the fallback does not apply (name is
@@ -376,7 +383,10 @@ func (s *Sandbox) OpenAnywhere(name string) (*os.File, error) {
 
 // ReadFileAnywhere is ReadFile for read-only callers: outside absolute
 // paths are read from the real filesystem. Inside the sandbox both share
-// readFileRoot, transient-error retries included.
+// readFileRoot, transient-error retries included. Outside reads go through
+// os.ReadFile and are not retried — a deliberate asymmetry: os.ReadFile
+// already snapshots the whole file, so the retry loop would only multiply
+// the cost of a read that is genuinely failing.
 func (s *Sandbox) ReadFileAnywhere(name string) ([]byte, error) {
 	root, rel, err := s.resolveToRoot(name)
 	if err == nil {
