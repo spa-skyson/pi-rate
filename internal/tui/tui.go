@@ -1121,7 +1121,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// without consuming one: the readers then accumulate for the whole turn, and
 	// on close(agentCh) every one of them delivers its own agentDoneMsg, running
 	// handleAgentDone — lifecycle hooks, startNextPrompt — once per surplus
-	// reader. See TestAgentListenerStaysSingle.
+	// reader. See TestUnclaimedMessageDoesNotArmAgentListener and
+	// TestWindowSizeDoesNotArmAgentListener.
 	return m, nil
 }
 
@@ -1218,7 +1219,16 @@ func (m *model) handleKeyPressMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 // that says why the prompt is waiting.
 func (m *model) handleInputSubmit(msg InputSubmitMsg) (tea.Model, tea.Cmd, bool) {
 	if strings.HasPrefix(msg.Text, "/") {
-		if m.running {
+		if m.running || m.bgAlive() {
+			// The loop reads the session the command would rewrite
+			// (/compact, /branch, /clear): a backgrounded run holds it, the
+			// same reason queued prompts wait. The running case stays
+			// silent as it always was — there, the running status explains
+			// itself; detached, the free input makes silence read as a
+			// swallowed keystroke, so name the reason.
+			if m.bgAlive() {
+				m.chatModel.AppendNotice("Slash commands are unavailable while a run is in the background — Ctrl+B to attach.")
+			}
 			return m, nil, true
 		}
 		model, cmd := m.handleSlashCommand(msg.Text)
@@ -1328,9 +1338,16 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // updateAgentStream handles the events streamed by a running agent turn.
 func (m *model) updateAgentStream(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
+	// An event read from a backgrounded run's channel: the envelope names
+	// the run, so a run canceled while detached cannot have its late events
+	// mistaken for the next turn's (background.go).
+	if env, ok := msg.(bgEnvelope); ok {
+		model, cmd := m.handleBgEnvelope(env)
+		return model, cmd, true
+	}
 	// A detached run's events buffer instead of rendering. Routing, not a
-	// second reader: the parked waitForAgent command delivered this message
-	// and the handler below re-arms it on the same channel (background.go).
+	// second reader: the parked command delivered this message and the
+	// handler below re-arms by the message's source (background.go).
 	if m.bgAlive() {
 		if _, ok := msg.(agentMsg); ok {
 			model, cmd := m.handleBackgroundAgentMsg(msg)
@@ -1816,11 +1833,28 @@ func (m *model) handleInterruptKey(key tea.Key) (tea.Model, tea.Cmd, bool) {
 			m.chatModel.AppendWarning("\nEsc again to cancel...")
 			return m, resetEscCancelCount(m), true
 		}
+		if m.bgAlive() {
+			// The backgrounded run deserves the same double-Esc contract:
+			// the input is free, so a bare Esc must stay a no-op, but a
+			// deliberate Esc-Esc reaches the run the input no longer holds.
+			m.escCancelCount++
+			if m.escCancelCount >= 2 {
+				m.escCancelCount = 0
+				return m, m.cancelBackgroundRun(), true
+			}
+			m.chatModel.AppendWarning("\nEsc again to cancel the background run...")
+			return m, resetEscCancelCount(m), true
+		}
 		return m, nil, true
 
 	case "key.quit":
-		if m.running {
-			cmd := m.cancelAgent()
+		if m.running || m.bgAlive() {
+			var cmd tea.Cmd
+			if m.bgAlive() {
+				cmd = m.cancelBackgroundRun()
+			} else {
+				cmd = m.cancelAgent()
+			}
 			m.ctrlCCount++
 			m.chatModel.AppendWarning("\nCtrl+C again to quit...")
 			return m, tea.Batch(cmd, resetCtrlCCount(m)), true

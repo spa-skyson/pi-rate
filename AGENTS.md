@@ -777,8 +777,12 @@ never silently.
   while the detached run is alive, new prompts queue instead of starting and
   agent/model switches refuse, because `RebuildWithSession` and
   `RebuildWithModel` mutate the `*Agent` in place under the live loop
-  (`internal/tui/background.go`, guards in `startNextPrompt`, `applyAgent`,
-  `handleModelCommand`). A finished background run frees the agent without an
-  attach. The channel reader never changes hands: the parked `waitForAgent`
-  command stays the only reader through detach and attach — routing, never a
-  second goroutine.
+  (`internal/tui/background.go`; guards in `startNextPrompt`,
+  `startAgentLoop`, `applyAgent`, `handleModelCommand`, `handleRetry`, and the
+  slash branch of `handleInputSubmit`). A finished or Esc-canceled background
+  run frees the agent without an attach. Channel readers never change hands:
+  every channel keeps its single parked reader through detach and attach —
+  the run channel's events arrive in envelopes naming their run, so a
+  canceled run's late events are swallowed instead of being mistaken for the
+  next turn's, and subagent events always re-arm `waitForSubEvent`, their own
+  reader — routing, never a second goroutine.

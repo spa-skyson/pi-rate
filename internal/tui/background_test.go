@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -337,7 +338,17 @@ func TestBackground_PumpRace(t *testing.T) {
 			t.Fatal("no reader parked before the channel closed")
 		}
 		msg := parked()
-		if text, ok := msg.(agentTextMsg); ok {
+		ev := msg
+		// The run channel's reader re-arms into envelopes once the run is
+		// detached; unwrap, and stop at the close.
+		if env, ok := msg.(bgEnvelope); ok {
+			if env.ev == nil {
+				m.Update(msg)
+				break
+			}
+			ev = env.ev
+		}
+		if text, ok := ev.(agentTextMsg); ok {
 			_, parked = m.Update(msg)
 			seen[text.text]++
 			continue
@@ -487,5 +498,279 @@ func TestBackground_QuestionDetachedStashOpensOnAttach(t *testing.T) {
 	m = newM.(*model)
 	if m.question == nil || m.question.req.Question != "Proceed?" {
 		t.Fatalf("attach did not open the stashed question: %+v", m.question)
+	}
+}
+
+// readWithTimeout runs a parked command with a deadline. A reader parked on
+// the wrong channel blocks forever — that hang IS the bug, so the deadline
+// turns it into a fast failure instead of a test timeout.
+func readWithTimeout(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case msg := <-done:
+		return msg
+	case <-time.After(2 * time.Second):
+		t.Fatal("a parked reader blocked — it is waiting on the wrong channel")
+		return nil
+	}
+}
+
+// TestBackground_RearmFollowsTheMessageSource is the CRITICAL routing proof:
+// a subagent event detached must re-arm the subagent monitor's reader
+// (AgentEventCh), never the run channel. A waitForAgent re-arm here would
+// park a second reader on the run channel — a second synthetic done at
+// close, a doubled finalization — and freeze the monitor. Both readers are
+// exercised for real: after the routing, the parked subagent command reads
+// AgentEventCh and the parked run command reads agentCh.
+func TestBackground_RearmFollowsTheMessageSource(t *testing.T) {
+	m := newTestModel(t)
+	m.agentCh = make(chan agentMsg, 8)
+	subCh := make(chan AgentSubEvent, 8)
+	m.cfg.AgentEventCh = subCh
+	m.beginTurn()
+	m.running = false
+	m.bg = &backgroundRun{started: time.Now(), ch: m.agentCh}
+
+	// One event of each kind, delivered detached: the returned commands are
+	// the parked readers.
+	_, cmdRun := m.Update(agentTextMsg{text: "delta"})
+	_, cmdSub := m.Update(agentSubEventMsg{agentID: "a", kind: "text", content: "sub delta"})
+	if cmdRun == nil || cmdSub == nil {
+		t.Fatal("the detached routing returned no re-arm")
+	}
+	if m.bg.seen != 2 {
+		t.Fatalf("seen = %d, want 2", m.bg.seen)
+	}
+
+	// Feed each channel, then ask each parked command to read: the
+	// subagent reader must surface a subagent event, the run reader a run
+	// event — swapped channels here would mean a parked second reader on
+	// agentCh and a dead monitor.
+	m.agentCh <- agentTextMsg{text: "run next"}
+	subCh <- AgentSubEvent{AgentID: "a", Kind: "text", Content: "sub next"}
+	subMsg := readWithTimeout(t, cmdSub)
+	runMsg := readWithTimeout(t, cmdRun)
+	if _, ok := subMsg.(agentSubEventMsg); !ok {
+		t.Fatalf("subagent reader delivered %T, want agentSubEventMsg — it is parked on the wrong channel", subMsg)
+	}
+	runEnv, ok := runMsg.(bgEnvelope)
+	if !ok {
+		t.Fatalf("run reader delivered %T, want a bgEnvelope", runMsg)
+	}
+	if _, ok := runEnv.ev.(agentTextMsg); !ok {
+		t.Fatalf("run reader's event = %T, want agentTextMsg — it is parked on the wrong channel", runEnv.ev)
+	}
+
+	// Exactly one finalization at close: the run channel closes, its reader
+	// synthesizes one done; the subagent reader stays on its own channel and
+	// contributes nothing.
+	close(m.agentCh)
+	env, ok := readWithTimeout(t, cmdRun).(bgEnvelope)
+	if !ok || env.ev != nil {
+		t.Fatalf("close delivered %T, want an empty bgEnvelope", env)
+	}
+	if _, cmd := m.Update(env); cmd != nil {
+		t.Fatalf("finalization returned a command: re-arming a closed channel")
+	}
+	if n := strings.Count(noticesText(m), "Background run finished"); n != 1 {
+		t.Fatalf("finalization notices = %d, want exactly 1", n)
+	}
+	// The monitor's reader survives the run: it still reads AgentEventCh.
+	subCh <- AgentSubEvent{AgentID: "a", Kind: "text", Content: "after close"}
+	if _, ok := cmdSub().(agentSubEventMsg); !ok {
+		t.Fatal("the subagent reader died with the run")
+	}
+}
+
+// TestBackground_CancelWhileDetached: Esc-Esc cancels the backgrounded run —
+// the run finalizes synthetically, a stashed approval is denied, and the
+// prompt queue starts without an attach.
+func TestBackground_CancelWhileDetached(t *testing.T) {
+	m := newBgTestModel(t, &fnLLM{name: "bg-cancel", gen: func(int) (*llmmodel.LLMResponse, error) {
+		return textResp("never arrives"), nil
+	}})
+	m.beginTurn()
+	_ = m.startAgentLoop("long task")
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	// A stashed approval and a queued prompt wait on the run.
+	reply := make(chan permission.ApprovalResult, 1)
+	m.bg.approval = &permission.ApprovalRequest{Tool: "bash", Reply: reply}
+	m.pendingPrompts = []queuedPrompt{{text: "waiting"}}
+	esc := tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}).Key()
+
+	newM, _, _ = m.handleInterruptKey(esc)
+	m = newM.(*model)
+	if m.escCancelCount != 1 {
+		t.Fatalf("first Esc: escCancelCount = %d, want 1", m.escCancelCount)
+	}
+	if m.bg == nil || m.bg.done {
+		t.Fatal("the first Esc canceled the run outright")
+	}
+
+	newM, _, _ = m.handleInterruptKey(esc)
+	m = newM.(*model)
+	if m.bg == nil || !m.bg.done {
+		t.Fatal("Esc-Esc did not finalize the background run")
+	}
+	if m.bg.doneErr == nil || !errors.Is(m.bg.doneErr, context.Canceled) {
+		t.Fatalf("doneErr = %v, want context.Canceled", m.bg.doneErr)
+	}
+	select {
+	case res := <-reply:
+		if res.Allowed {
+			t.Fatal("the stashed approval was answered allowed")
+		}
+	default:
+		t.Fatal("the stashed approval was never answered")
+	}
+	if len(m.pendingPrompts) != 0 || !m.running {
+		t.Fatal("the queue did not start after the cancel")
+	}
+	if m.agentCancel != nil {
+		m.agentCancel()
+	}
+}
+
+// TestBackground_LateEventsAfterCancelDie: after a synthetic cancel the dead
+// loop may still deliver through its parked envelope reader. Those events
+// must be swallowed — no second finalization, no rendering — while a
+// subagent event keeps the monitor alive.
+func TestBackground_LateEventsAfterCancelDie(t *testing.T) {
+	m := newTestModel(t)
+	m.agentCh = make(chan agentMsg, 8)
+	m.cfg.AgentEventCh = make(chan AgentSubEvent, 8)
+	m.beginTurn()
+	m.running = false
+	m.bg = &backgroundRun{started: time.Now(), ch: m.agentCh}
+
+	_, cancelCmd, _ := m.handleInterruptKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}).Key())
+	_, _, _ = m.handleInterruptKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}).Key())
+	_ = cancelCmd
+	if !m.bg.done {
+		t.Fatal("the cancel did not finalize the run")
+	}
+	noticesAfterCancel := noticesText(m)
+
+	// Late events from the dying loop: swallowed, not rendered, not
+	// finalized again.
+	m.Update(bgEnvelope{bg: m.bg, ev: agentTextMsg{text: "late"}})
+	if strings.Contains(transcriptText(m), "late") {
+		t.Fatal("a late event from a canceled run rendered")
+	}
+	m.Update(bgEnvelope{bg: m.bg, ev: nil})
+	if n := strings.Count(noticesText(m), "Background run"); n != strings.Count(noticesAfterCancel, "Background run") {
+		t.Fatalf("late delivery re-finalized the run: notices grew from %d to %d",
+			strings.Count(noticesAfterCancel, "Background run"), strings.Count(noticesText(m), "Background run"))
+	}
+	// Subagent events ride the session channel: never swallowed.
+	_, subCmd := m.Update(agentSubEventMsg{agentID: "a", kind: "text", content: "s"})
+	if subCmd == nil {
+		t.Fatal("a subagent event after cancel killed the monitor's reader")
+	}
+}
+
+// TestBackground_RunCycleCannotDetach: /run events bypass the agent channel,
+// so a detached entry would never see the cycle's end and wedge the queue.
+func TestBackground_RunCycleCannotDetach(t *testing.T) {
+	m := newTestModel(t)
+	m.beginTurn()
+	m.run = &runState{phase: "running"}
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.bg != nil {
+		t.Fatal("a /run cycle was backgrounded")
+	}
+	if !strings.Contains(m.flash, "/run cycles cannot be backgrounded") {
+		t.Fatalf("flash = %q, want the /run refusal", m.flash)
+	}
+
+	// A finished cycle is no longer a cycle: detach works.
+	m.run.phase = "done"
+	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.bg == nil {
+		t.Fatal("detach refused for a terminal /run state")
+	}
+}
+
+// TestBackground_SlashCommandsRefuseWhileBgAlive: a backgrounded run holds
+// the session the slash command would rewrite.
+func TestBackground_SlashCommandsRefuseWhileBgAlive(t *testing.T) {
+	m := newTestModel(t)
+	m.bg = &backgroundRun{started: time.Now()}
+	submitted, _, _ := m.handleInputSubmit(InputSubmitMsg{Text: "/compact"})
+	m = submitted.(*model)
+	if !strings.Contains(noticesText(m), "Slash commands are unavailable while a run is in the background") {
+		t.Fatal("the slash refusal notice is missing")
+	}
+}
+
+// TestBackground_AttachFailClosesAPriorDialog: a dialog left open from
+// before the detach is answered denied when the stash opens its own — a
+// loop blocks on one request, the old one was abandoned by construction.
+func TestBackground_AttachFailClosesAPriorDialog(t *testing.T) {
+	m := newTestModel(t)
+	oldReply := make(chan permission.ApprovalResult, 1)
+	m.approval = &permission.ApprovalRequest{Tool: "old", Reply: oldReply}
+	m.bg = &backgroundRun{
+		started:  time.Now(),
+		approval: &permission.ApprovalRequest{Tool: "stashed", Reply: make(chan permission.ApprovalResult, 1)},
+	}
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.approval == nil || m.approval.Tool != "stashed" {
+		t.Fatalf("attach opened %+v, want the stashed dialog", m.approval)
+	}
+	select {
+	case res := <-oldReply:
+		if res.Allowed {
+			t.Fatal("the prior dialog was answered allowed")
+		}
+	default:
+		t.Fatal("the prior dialog was never answered")
+	}
+}
+
+// TestBackground_EnvelopeAfterAttachRendersOrdinary: a reader armed while
+// detached delivers after attach — the event renders through the ordinary
+// path and the lineage ends (no envelope re-arm).
+func TestBackground_EnvelopeAfterAttachRendersOrdinary(t *testing.T) {
+	m := newTestModel(t)
+	m.agentCh = make(chan agentMsg, 8)
+	m.beginTurn()
+	m.running = false
+	m.bg = &backgroundRun{started: time.Now(), ch: m.agentCh}
+
+	// Attach a live run: the input is busy again, the buffer replays.
+	m.chatModel.AppendNotice("detach marker")
+	m.handleKey(tea.KeyPressMsg(ctrlB()))
+	if m.bg != nil || !m.running {
+		t.Fatal("attach of a live run did not return it to the foreground")
+	}
+
+	// The pre-attach reader now delivers: rendered, unmarked re-arm.
+	env := bgEnvelope{bg: &backgroundRun{started: time.Now()}, ev: agentTextMsg{text: "after attach"}}
+	updated, cmd := m.Update(env)
+	m = updated.(*model)
+	if !strings.Contains(transcriptText(m), "after attach") {
+		t.Fatal("a post-attach envelope event did not render")
+	}
+	if cmd == nil {
+		t.Fatal("the ordinary path returned no re-arm for the live run")
+	}
+}
+
+// TestBackground_StatusDoneShowsDropped: a finished run's evicted events are
+// gone for good — the done field carries the count.
+func TestBackground_StatusDoneShowsDropped(t *testing.T) {
+	p := paletteOrDark(Palette{})
+	got := statusBackgroundField(StatusRenderInput{Background: &BackgroundStatus{
+		Events: 34, Dropped: 12, Done: true,
+	}}, p)
+	if len(got) != 1 || !strings.Contains(got[0], "12 dropped") {
+		t.Fatalf("done field = %v, want the dropped count", got)
 	}
 }
