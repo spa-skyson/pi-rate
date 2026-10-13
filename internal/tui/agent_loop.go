@@ -924,6 +924,14 @@ func (m *model) cancelAgent() tea.Cmd {
 }
 
 func (m *model) startAgentLoop(prompt string) tea.Cmd {
+	if m.bgAlive() {
+		// The one-live-loop invariant: a backgrounded run holds the agent,
+		// and a second live loop would run beneath a rebuild meant for it.
+		// beginTurn already fired in the caller — undo it, no loop started.
+		m.running = false
+		m.chatModel.AppendNotice("Background run active — Ctrl+B to attach; this task cannot start until then.")
+		return nil
+	}
 	ch := make(chan agentMsg, 64)
 	m.agentCh = ch
 	agentCtx, agentCancel := context.WithCancel(m.ctx)
@@ -982,6 +990,8 @@ func (m *model) handleRetry() (tea.Model, tea.Cmd) {
 	switch {
 	case m.running:
 		return m, m.setFlash("Still running")
+	case m.bgAlive():
+		return m, m.setFlash("Background run active — Ctrl+B to attach")
 	case m.lastPrompt == "" || !m.lastPromptFailed:
 		return m, m.setFlash("Nothing to retry")
 	}
@@ -999,9 +1009,12 @@ func (m *model) enqueuePrompt(text string, mentions []string) (tea.Model, tea.Cm
 	return m.startNextPrompt()
 }
 
-// startNextPrompt begins the oldest queued prompt, if the UI is idle.
+// startNextPrompt begins the oldest queued prompt, if the UI is idle and no
+// backgrounded run holds the agent. Detach frees the *input*, never the
+// *agent*: a prompt typed to a background run waits here until the run
+// finishes (which restarts this via handleAgentDone) or is attached.
 func (m *model) startNextPrompt() (tea.Model, tea.Cmd) {
-	if m.running || len(m.pendingPrompts) == 0 {
+	if m.running || m.bgAlive() || len(m.pendingPrompts) == 0 {
 		return m, nil
 	}
 	next := m.pendingPrompts[0]
