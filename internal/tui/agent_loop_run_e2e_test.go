@@ -156,7 +156,7 @@ func TestRunAgentLoop_TextCompletion(t *testing.T) {
 	res := driveRunLoop(t, a, sid, "say something")
 
 	// Clean completion closes the channel without an explicit done message
-	// (waitForAgent synthesizes one from the close in the live TUI).
+	// (waitForSlotAgent wraps the close as a nil-ev envelope in the live TUI).
 	if res.doneErr != nil {
 		t.Fatalf("expected clean completion, got error: %v", res.doneErr)
 	}

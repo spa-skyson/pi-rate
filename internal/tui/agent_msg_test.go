@@ -34,30 +34,33 @@ func TestAgentMsgInterfaceMethods(t *testing.T) {
 	}
 }
 
-// --- waitForAgent tests (additional) ---
+// --- waitForSlotAgent tests (additional) ---
 
-func TestWaitForAgent_NilCh(t *testing.T) {
-	cmd := waitForAgent(nil)
+func TestWaitForSlotAgent_NilCh(t *testing.T) {
+	cmd := waitForSlotAgent(nil)
 	if cmd != nil {
 		t.Error("expected nil cmd for nil channel")
 	}
 }
 
-func TestWaitForAgent_ReceivesTextMsg(t *testing.T) {
+func TestWaitForSlotAgent_ReceivesTextMsg(t *testing.T) {
 	ch := make(chan agentMsg, 1)
 	ch <- agentTextMsg{text: "hello"}
 
-	cmd := waitForAgent(ch)
+	cmd := waitForSlotAgent(ch)
 	if cmd == nil {
 		t.Fatal("expected non-nil cmd")
 	}
-	msg := cmd()
-	textMsg, ok := msg.(agentTextMsg)
+	env, ok := cmd().(slotEnvelope)
 	if !ok {
-		t.Fatalf("expected agentTextMsg, got %T", msg)
+		t.Fatalf("expected slotEnvelope, got %T", cmd)
 	}
-	if textMsg.text != "hello" {
-		t.Errorf("expected 'hello', got %q", textMsg.text)
+	textMsg, ok := env.ev.(agentTextMsg)
+	if !ok {
+		t.Fatalf("expected agentTextMsg, got %T", env.ev)
+	}
+	if textMsg.text != "hello" || env.ch != ch {
+		t.Errorf("expected 'hello' on the armed channel, got %q ch=%v", textMsg.text, env.ch)
 	}
 }
 

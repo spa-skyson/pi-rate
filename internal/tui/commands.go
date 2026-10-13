@@ -464,15 +464,8 @@ func (m *model) handleModelCommand(args []string) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	}
-	if m.bgAlive() {
-		// Same contract as the running guard, same reason: the rebuild under
-		// this switch would land on a loop that is still live, just detached.
-		m.chatModel.Messages = append(m.chatModel.Messages, message{
-			role:    "assistant",
-			content: "Cannot switch model while a run is in the background. Attach it (Ctrl+B) or wait for it to finish.",
-		})
-		return m, nil
-	}
+	// No background gate here: the slot freezes its own agent while its loop
+	// lives, and RebuildWithModel below targets only the active slot's agent.
 
 	newLLM, newName, newProvider, err := m.cfg.ModelSwitcher(m.ctx, modelName)
 	if err != nil {

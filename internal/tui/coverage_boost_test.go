@@ -969,35 +969,41 @@ func TestCancelAgent_NoChannel_CB(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// waitForAgent — nil channel.
+// waitForSlotAgent — the envelope-arming run-channel reader.
 // -----------------------------------------------------------------------------
 
-func TestWaitForAgent_NilChannel(t *testing.T) {
-	if got := waitForAgent(nil); got != nil {
+func TestWaitForSlotAgent_NilChannel(t *testing.T) {
+	if got := waitForSlotAgent(nil); got != nil {
 		t.Error("expected nil cmd for nil channel")
 	}
 }
 
-func TestWaitForAgent_ClosedChannel_CB(t *testing.T) {
+func TestWaitForSlotAgent_ClosedChannel_CB(t *testing.T) {
 	ch := make(chan agentMsg)
 	close(ch)
-	cmd := waitForAgent(ch)
+	cmd := waitForSlotAgent(ch)
 	if cmd == nil {
 		t.Fatal("expected non-nil cmd")
 	}
-	msg := cmd()
-	if _, ok := msg.(agentDoneMsg); !ok {
-		t.Errorf("expected agentDoneMsg on closed channel, got %T", msg)
+	env, ok := cmd().(slotEnvelope)
+	if !ok {
+		t.Fatalf("expected slotEnvelope on closed channel, got %T", cmd)
+	}
+	if env.ev != nil || env.ch != ch {
+		t.Errorf("close delivered ev=%v ch=%v, want a nil event on the closed channel", env.ev, env.ch)
 	}
 }
 
-func TestWaitForAgent_ReceiveMessage(t *testing.T) {
+func TestWaitForSlotAgent_ReceiveMessage(t *testing.T) {
 	ch := make(chan agentMsg, 1)
 	ch <- agentTextMsg{text: "hi"}
-	cmd := waitForAgent(ch)
-	msg := cmd()
-	if _, ok := msg.(agentTextMsg); !ok {
-		t.Errorf("expected agentTextMsg, got %T", msg)
+	cmd := waitForSlotAgent(ch)
+	env, ok := cmd().(slotEnvelope)
+	if !ok {
+		t.Fatalf("expected slotEnvelope, got %T", cmd)
+	}
+	if _, ok := env.ev.(agentTextMsg); !ok || env.ch != ch {
+		t.Errorf("expected agentTextMsg on the armed channel, got ev=%v ch=%v", env.ev, env.ch)
 	}
 }
 

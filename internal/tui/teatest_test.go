@@ -1393,35 +1393,44 @@ func TestAgentMsgMarkers(t *testing.T) {
 	agentSubEventMsg{}.agentMsg()
 }
 
-// --- waitForAgent ---
+// --- waitForSlotAgent: the run-channel reader arms as an envelope ---
 
-func TestWaitForAgent_Nil(t *testing.T) {
-	cmd := waitForAgent(nil)
+func TestWaitForSlotAgent_Nil(t *testing.T) {
+	cmd := waitForSlotAgent(nil)
 	if cmd != nil {
 		t.Error("expected nil cmd for nil channel")
 	}
 }
 
-func TestWaitForAgent_ClosedChannel(t *testing.T) {
+func TestWaitForSlotAgent_ClosedChannel(t *testing.T) {
 	ch := make(chan agentMsg)
 	close(ch)
-	cmd := waitForAgent(ch)
+	cmd := waitForSlotAgent(ch)
 	if cmd == nil {
 		t.Fatal("expected non-nil cmd")
 	}
-	msg := cmd()
-	if _, ok := msg.(agentDoneMsg); !ok {
-		t.Errorf("expected agentDoneMsg from closed channel, got %T", msg)
+	env, ok := cmd().(slotEnvelope)
+	if !ok {
+		t.Fatalf("expected slotEnvelope from closed channel, got %T", cmd)
+	}
+	// A close reads as a nil event inside an envelope naming its channel:
+	// the slot router needs the channel to tell whose done this is.
+	if env.ev != nil || env.ch != ch {
+		t.Errorf("close delivered ev=%v ch=%v, want nil event on the same channel", env.ev, env.ch)
 	}
 }
 
-func TestWaitForAgent_ReceivesMsg(t *testing.T) {
+func TestWaitForSlotAgent_ReceivesMsg(t *testing.T) {
 	ch := make(chan agentMsg, 1)
 	ch <- agentTextMsg{text: "hello"}
-	cmd := waitForAgent(ch)
-	msg := cmd()
-	if tm, ok := msg.(agentTextMsg); !ok || tm.text != "hello" {
-		t.Errorf("expected agentTextMsg 'hello', got %T", msg)
+	cmd := waitForSlotAgent(ch)
+	env, ok := cmd().(slotEnvelope)
+	if !ok {
+		t.Fatalf("expected slotEnvelope, got %T", cmd)
+	}
+	tm, ok := env.ev.(agentTextMsg)
+	if !ok || tm.text != "hello" || env.ch != ch {
+		t.Errorf("expected agentTextMsg 'hello' on the same channel, got ev=%v ch=%v", env.ev, env.ch)
 	}
 }
 

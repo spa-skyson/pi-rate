@@ -10,8 +10,8 @@ import (
 
 // newHandlerModel builds a minimal model suitable for exercising the
 // handleAgent* message handlers directly. width is set so mainWidth()/matrix
-// don't degenerate, and agentCh is buffered so the returned waitForAgent Cmd
-// (if invoked) never blocks.
+// don't degenerate, and agentCh is buffered so the returned waitForSlotAgent
+// Cmd (if invoked) never blocks.
 func newHandlerModel() *model {
 	m := &model{width: 100, height: 30}
 	m.agentCh = make(chan agentMsg, 8)

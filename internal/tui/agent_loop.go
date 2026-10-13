@@ -773,18 +773,26 @@ func formatTurnDuration(d time.Duration) string {
 	}
 }
 
-// waitForAgent returns a Cmd that waits for the next message on the agent channel.
-func waitForAgent(ch chan agentMsg) tea.Cmd {
+// waitForSlotAgent returns a Cmd that waits for the next message on a run
+// channel and wraps it in an envelope naming the channel — attribution at
+// arm time, so a delivery can always be routed to the run that owns the
+// channel it came from. A close reads as a nil event inside the envelope.
+func waitForSlotAgent(ch chan agentMsg) tea.Cmd {
 	if ch == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		msg, ok := <-ch
-		if !ok {
-			return agentDoneMsg{}
-		}
-		return msg
+		ev, ok := <-ch
+		return slotEnvelope{ch: ch, ev: ev2nil(ok, ev)}
 	}
+}
+
+// ev2nil maps a closed-channel read to a nil event.
+func ev2nil(ok bool, ev agentMsg) agentMsg {
+	if !ok {
+		return nil
+	}
+	return ev
 }
 
 // systemNoticeMsg carries a short system message into the chat transcript.
@@ -924,20 +932,15 @@ func (m *model) cancelAgent() tea.Cmd {
 }
 
 func (m *model) startAgentLoop(prompt string) tea.Cmd {
-	if m.bgAlive() {
-		// The one-live-loop invariant: a backgrounded run holds the agent,
-		// and a second live loop would run beneath a rebuild meant for it.
-		// beginTurn already fired in the caller — undo it, no loop started.
-		m.running = false
-		m.chatModel.AppendNotice("Background run active — Ctrl+B to attach; this task cannot start until then.")
-		return nil
-	}
 	ch := make(chan agentMsg, 64)
 	m.agentCh = ch
 	agentCtx, agentCancel := context.WithCancel(m.ctx)
 	m.agentCancel = agentCancel
 	go m.runAgentLoop(agentCtx, prompt, ch, m.agentRun())
-	return waitForAgent(m.agentCh)
+	// The reader is armed as an envelope from the start: once a background
+	// slot runs beside this loop, a raw event could not be attributed to a
+	// channel anymore — the envelope names the channel it was read from.
+	return waitForSlotAgent(m.agentCh)
 }
 
 // agentRunConfig is the slice of cfg the agent loop needs, read once on the
@@ -986,12 +989,12 @@ const maxPendingPrompts = 32
 // Refuses unless a previous turn actually failed, so it can never replay a
 // prompt whose answer is already on screen, and stays silent while a turn runs.
 // A turn the user canceled counts as not-failed, so Esc is never replayed.
+// A background slot holds its own session and its own agent, so it never
+// blocks a retry: the retry replays into the active session only.
 func (m *model) handleRetry() (tea.Model, tea.Cmd) {
 	switch {
 	case m.running:
 		return m, m.setFlash("Still running")
-	case m.bgAlive():
-		return m, m.setFlash("Background run active — Ctrl+B to attach")
 	case m.lastPrompt == "" || !m.lastPromptFailed:
 		return m, m.setFlash("Nothing to retry")
 	}
@@ -1009,12 +1012,12 @@ func (m *model) enqueuePrompt(text string, mentions []string) (tea.Model, tea.Cm
 	return m.startNextPrompt()
 }
 
-// startNextPrompt begins the oldest queued prompt, if the UI is idle and no
-// backgrounded run holds the agent. Detach frees the *input*, never the
-// *agent*: a prompt typed to a background run waits here until the run
-// finishes (which restarts this via handleAgentDone) or is attached.
+// startNextPrompt begins the oldest queued prompt, if the UI is idle. The
+// queue is the ACTIVE session's inbox: a background slot holds its own
+// session whole — its own agent and its own inbox — so it never blocks the
+// active session from starting a turn.
 func (m *model) startNextPrompt() (tea.Model, tea.Cmd) {
-	if m.running || m.bgAlive() || len(m.pendingPrompts) == 0 {
+	if m.running || len(m.pendingPrompts) == 0 {
 		return m, nil
 	}
 	next := m.pendingPrompts[0]
@@ -1022,21 +1025,27 @@ func (m *model) startNextPrompt() (tea.Model, tea.Cmd) {
 	return m.submitPrompt(next.text, next.mentions)
 }
 
+// wrapMentions appends referenced file annotations for @mentions — the wire
+// form submitPrompt sends to the agent, shared with the slot inbox path.
+func wrapMentions(text string, mentions []string) string {
+	if len(mentions) == 0 {
+		return text
+	}
+	var refs strings.Builder
+	refs.WriteString(text)
+	refs.WriteString("\n")
+	for _, path := range mentions {
+		refs.WriteString("\n[Referenced file: ")
+		refs.WriteString(path)
+		refs.WriteString("]")
+	}
+	return refs.String()
+}
+
 // submitPrompt sends a user prompt to the agent.
 func (m *model) submitPrompt(text string, mentions []string) (tea.Model, tea.Cmd) {
 	// Append referenced file annotations for @mentions.
-	promptText := text
-	if len(mentions) > 0 {
-		var refs strings.Builder
-		refs.WriteString(text)
-		refs.WriteString("\n")
-		for _, path := range mentions {
-			refs.WriteString("\n[Referenced file: ")
-			refs.WriteString(path)
-			refs.WriteString("]")
-		}
-		promptText = refs.String()
-	}
+	promptText := wrapMentions(text, mentions)
 
 	if m.cfg.Logger != nil {
 		m.cfg.Logger.UserMessage(promptText)
@@ -1683,13 +1692,13 @@ func (m *model) handleAgentThinking(msg agentThinkingMsg) (tea.Model, tea.Cmd) {
 		})
 	}
 	m.chatModel.Scroll = 0
-	return m, waitForAgent(m.agentCh)
+	return m, waitForSlotAgent(m.agentCh)
 }
 
 // handleAgentWarning processes an agentWarningMsg.
 func (m *model) handleAgentWarning(msg agentWarningMsg) (tea.Model, tea.Cmd) {
 	m.chatModel.AppendWarning(msg.text)
-	return m, waitForAgent(m.agentCh)
+	return m, waitForSlotAgent(m.agentCh)
 }
 
 // handleAgentUsage appends the per-turn token summary to the transcript. A nil
@@ -1699,7 +1708,7 @@ func (m *model) handleAgentUsage(msg agentUsageMsg) (tea.Model, tea.Cmd) {
 	if s := formatTurnUsage(msg.usage, msg.elapsed); s != "" {
 		m.chatModel.AppendMeta(s)
 	}
-	return m, waitForAgent(m.agentCh)
+	return m, waitForSlotAgent(m.agentCh)
 }
 
 // handleAgentText processes an agentTextMsg.
@@ -1753,7 +1762,7 @@ func (m *model) handleAgentText(msg agentTextMsg) (tea.Model, tea.Cmd) {
 			time: time.Now(), kind: "llm", summary: "LLM response", detail: msg.text,
 		})
 	}
-	return m, waitForAgent(m.agentCh)
+	return m, waitForSlotAgent(m.agentCh)
 }
 
 // handleAgentToolCall processes an agentToolCallMsg.
@@ -1786,7 +1795,7 @@ func (m *model) handleAgentToolCall(msg agentToolCallMsg) (tea.Model, tea.Cmd) {
 			card.toolID = msg.id
 			card.pollCount++
 			card.pendingRefresh = true
-			return m, waitForAgent(m.agentCh)
+			return m, waitForSlotAgent(m.agentCh)
 		}
 	}
 	newMsg := message{
@@ -1806,10 +1815,10 @@ func (m *model) handleAgentToolCall(msg agentToolCallMsg) (tea.Model, tea.Cmd) {
 		// the configured agent name (agent_name) as the bracketed label.
 		subMsgs := splitSubagentCards(newMsg, msg.args)
 		m.chatModel.Messages = append(m.chatModel.Messages, subMsgs...)
-		return m, waitForAgent(m.agentCh)
+		return m, waitForSlotAgent(m.agentCh)
 	}
 	m.chatModel.Messages = append(m.chatModel.Messages, newMsg)
-	return m, waitForAgent(m.agentCh)
+	return m, waitForSlotAgent(m.agentCh)
 }
 
 // splitSubagentCards fans a single subagent tool call out into one visual
@@ -1999,7 +2008,7 @@ func (m *model) handleAgentToolResult(msg agentToolResultMsg) (tea.Model, tea.Cm
 		}
 	}
 	m.refreshDiffStats()
-	return m, waitForAgent(m.agentCh)
+	return m, waitForSlotAgent(m.agentCh)
 }
 
 // bashControlHeaderFromResult builds the "handle: command" header for a

@@ -397,7 +397,8 @@ func TestRunAgentLoop_MidturnTransientWithoutPartialText(t *testing.T) {
 		t.Fatalf("texts = %q, want the replay's answer only", res.texts)
 	}
 	// A clean completion reports through the channel close alone (the live
-	// TUI's waitForAgent synthesizes the done from it), so no done message
+	// TUI's waitForSlotAgent wraps the close as a nil-ev slotEnvelope, which
+	// handleSlotEnvelope finalizes from), so no done message
 	// may arrive here — and certainly not two.
 	if res.doneCount != 0 {
 		t.Fatalf("agentDoneMsg emitted %d times on a clean turn, want 0", res.doneCount)

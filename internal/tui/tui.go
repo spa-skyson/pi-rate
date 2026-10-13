@@ -1208,44 +1208,32 @@ func (m *model) handleKeyPressMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 }
 
 // handleInputSubmit runs a submitted line: a slash command directly, anything
-// else queued as a prompt. Slash commands are ignored while a turn is running
-// or a backgrounded run holds the agent.
+// else queued as a prompt. Slash commands are ignored while a turn is running.
 //
 // A prompt submitted mid-turn is queued without canceling the running turn
 // (opencode semantics: typing is never lost and the running turn completes
 // before the queued prompt starts). Esc or Ctrl+C still cancels explicitly.
-// Detached, the same queue takes the prompt — the backgrounded run holds the
-// agent, so nothing may start (the one-live-loop invariant) — with a flash
-// that says why the prompt is waiting.
+// A background slot holds its own session whole, so it never gates the
+// active session: prompts and slash commands act on the active session
+// immediately — that is the complaint issue #74 closes.
 func (m *model) handleInputSubmit(msg InputSubmitMsg) (tea.Model, tea.Cmd, bool) {
 	if strings.HasPrefix(msg.Text, "/") {
-		if m.running || m.bgAlive() {
+		if m.running {
 			// The loop reads the session the command would rewrite
-			// (/compact, /branch, /clear): a backgrounded run holds it, the
-			// same reason queued prompts wait. The running case stays
-			// silent as it always was — there, the running status explains
-			// itself; detached, the free input makes silence read as a
-			// swallowed keystroke, so name the reason.
-			if m.bgAlive() {
-				m.chatModel.AppendNotice("Slash commands are unavailable while a run is in the background — Ctrl+B to attach.")
-			}
+			// (/compact, /branch, /clear): the running turn holds it, the
+			// same reason queued prompts wait. The running status explains
+			// itself, so the refusal stays silent.
 			return m, nil, true
 		}
 		model, cmd := m.handleSlashCommand(msg.Text)
 		return model, cmd, true
 	}
-	if m.running || m.bgAlive() {
+	if m.running {
 		_, cmd := m.enqueuePrompt(msg.Text, msg.Mentions)
 		// Flash so Enter is not silent. enqueuePrompt sets flash
 		// to "Prompt queue full" when the queue is maxed; keep that.
 		if m.flash != "Prompt queue full" {
-			label := "Queued"
-			if m.bgAlive() {
-				// The input is free while a run is backgrounded, so a plain
-				// "Queued" would read as a stall: name the reason it waits.
-				label = "Queued — background run active"
-			}
-			flashCmd := m.setFlash(label)
+			flashCmd := m.setFlash("Queued")
 			if cmd != nil {
 				cmd = tea.Batch(cmd, flashCmd)
 			} else {
@@ -1338,21 +1326,12 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // updateAgentStream handles the events streamed by a running agent turn.
 func (m *model) updateAgentStream(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
-	// An event read from a backgrounded run's channel: the envelope names
-	// the run, so a run canceled while detached cannot have its late events
-	// mistaken for the next turn's (background.go).
-	if env, ok := msg.(bgEnvelope); ok {
-		model, cmd := m.handleBgEnvelope(env)
+	// An event read from a run channel: the envelope names the channel, the
+	// channel names the run — the background slot's events buffer, the
+	// active run's render, a dead channel's dribble dies (background.go).
+	if env, ok := msg.(slotEnvelope); ok {
+		model, cmd := m.handleSlotEnvelope(env)
 		return model, cmd, true
-	}
-	// A detached run's events buffer instead of rendering. Routing, not a
-	// second reader: the parked command delivered this message and the
-	// handler below re-arms by the message's source (background.go).
-	if m.bgAlive() {
-		if _, ok := msg.(agentMsg); ok {
-			model, cmd := m.handleBackgroundAgentMsg(msg)
-			return model, cmd, true
-		}
 	}
 	switch msg := msg.(type) {
 	case agentThinkingMsg:

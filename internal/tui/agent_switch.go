@@ -33,15 +33,14 @@ func (m *model) cycleAgent() (tea.Model, tea.Cmd) {
 
 // applyAgent switches the main session to the named primary agent ("" = the
 // built-in default agent), shared by /agent <name> and Shift+Tab. Like
-// /model, it refuses while a response is running or a backgrounded run holds
-// the agent: the agent object is being rebuilt underneath the loop, and the
-// rebuild must never run under a live one — the one-live-loop invariant.
+// /model, it refuses while a response is running: the agent object is being
+// rebuilt underneath the loop, and the rebuild must never run under a live
+// one. A background slot freezes ITS OWN agent while its loop lives — the
+// rebuild here targets only the active slot's agent, so the slot never
+// blocks a switch (issue #74).
 func (m *model) applyAgent(name string) (tea.Model, tea.Cmd) {
 	if m.running {
 		return m, m.setFlash("Cannot switch agent while a response is running")
-	}
-	if m.bgAlive() {
-		return m, m.setFlash("Background run active — attach (Ctrl+B) or wait for it to finish")
 	}
 	if m.cfg.Agent == nil || m.cfg.AgentSwitcher == nil {
 		m.chatModel.AppendNotice("Agent switching is not available in this context.")
