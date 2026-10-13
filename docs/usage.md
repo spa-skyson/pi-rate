@@ -328,7 +328,8 @@ but stay out of autocomplete to keep it concise.
 | `Shift+Tab` | Cycle the session agent                                       |
 | `Ctrl+R`    | Re-send the prompt of a turn that failed                      |
 | `Ctrl+O`    | Toggle compact tool output                                    |
-| `Ctrl+B`    | Toggle the branch popup                                       |
+| `Ctrl+B`    | Send the running task to background / attach it back          |
+| `Ctrl+G`    | Toggle the branch popup                                       |
 | `Ctrl+H`    | Open history search                                           |
 | `Ctrl+Z`    | Suspend the process                                           |
 | `Ctrl+C`    | Cancel the running turn; press twice to quit                  |
