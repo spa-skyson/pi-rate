@@ -39,7 +39,12 @@
 # more parents) warn instead of failing and are exempt from the
 # Signed-off-by check as well — a merge commit built by the GitLab web UI
 # carries neither a user signature nor a user Signed-off-by, and neither
-# can be added without rewriting the commit. Unsigned non-merge commits
+# can be added without rewriting the commit. A merge may also carry a VALID
+# signature with no Signed-off-by — a local converge merge created with -S
+# and no -s, already published on gitlab: rewriting it would invalidate
+# published history, and the signature proves authorship more strictly than
+# the trailer would, so under the same variable it warns "(signed,
+# Signed-off-by waived)" instead of failing. Unsigned non-merge commits
 # still fail both checks unconditionally, the size check is unchanged for
 # every commit, and without the variable the hook behaves exactly as
 # before.
@@ -52,6 +57,7 @@ unsigned=()
 missing_sob=()
 size_scan=()
 server_merges=()
+signed_merges_nosob=()
 
 # Set only for the mirror-converge push; see the header comment.
 allow_server_merges="${PI_PREPUSH_ALLOW_SERVER_MERGES:-}"
@@ -101,7 +107,10 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     # Classify once: under the escape hatch an unsigned merge commit is
     # warned about and skips BOTH the signature and the Signed-off-by gate
     # — a server-built merge cannot carry a user Signed-off-by any more
-    # than it can carry a user signature.
+    # than it can carry a user signature. A merge with a VALID signature
+    # but no Signed-off-by waives the same way: the signature proves
+    # authorship more strictly than the trailer would, and the commit may
+    # already be published on gitlab and cannot be rewritten.
     server_merge=""
     if ! verify_signature "$sha"; then
       if [ -n "$allow_server_merges" ] && is_merge "$sha"; then
@@ -110,6 +119,10 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       else
         unsigned+=("$sha")
       fi
+    elif [ -n "$allow_server_merges" ] && is_merge "$sha" &&
+         [ -z "$(git log --format='%(trailers:key=Signed-off-by,valueonly)' -1 "$sha" | tr -d '[:space:]')" ]; then
+      signed_merges_nosob+=("$sha")
+      server_merge=1
     fi
     if [ -n "$server_merge" ]; then
       continue
@@ -131,6 +144,10 @@ fi
 if [ "${#server_merges[@]}" -gt 0 ]; then
   echo "pre-push: WARNING: server-side merge commits allowed by PI_PREPUSH_ALLOW_SERVER_MERGES (unsigned, Signed-off-by waived):" >&2
   printf '  %s\n' "${server_merges[@]}" >&2
+fi
+if [ "${#signed_merges_nosob[@]}" -gt 0 ]; then
+  echo "pre-push: WARNING: merge commits allowed by PI_PREPUSH_ALLOW_SERVER_MERGES (signed, Signed-off-by waived):" >&2
+  printf '  %s\n' "${signed_merges_nosob[@]}" >&2
 fi
 if [ "${#unsigned[@]}" -gt 0 ]; then
   echo "pre-push: commits whose signature is missing or INVALID cannot be pushed:" >&2

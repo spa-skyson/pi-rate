@@ -232,12 +232,16 @@ of `PI_ALLOW_LARGE_FILES`:
 PI_PREPUSH_ALLOW_SERVER_MERGES=1 git push origin main
 ```
 
-The variable passes **only unsigned merge commits** (two or more parents) —
-they warn and go through, since server-side merges are legal per the
+The variable passes **merge commits only** (two or more parents). Unsigned
+ones warn and go through, since server-side merges are legal per the
 paragraph above; the Signed-off-by requirement is waived for them too,
 because a server-built merge carries neither a user signature nor a user
-Signed-off-by. Unsigned **non-merge** commits still fail both checks
-unconditionally, and the size check is unchanged for every commit.
+Signed-off-by. A merge may also carry a **valid signature without the
+trailer** — a local converge merge created with `-S` and no `-s`, already
+published on gitlab: the signature proves authorship more strictly than the
+trailer would, so it is waved under the same env with its own warning.
+Unsigned **non-merge** commits still fail both checks unconditionally, and
+the size check is unchanged for every commit.
 
 ### Never use `--no-verify`
 
