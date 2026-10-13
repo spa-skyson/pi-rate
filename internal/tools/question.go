@@ -127,16 +127,7 @@ func validateQuestionInput(in QuestionInput) error {
 // canceled result with a note, never a block.
 func newQuestionTool(notifier func(QuestionRequest)) (tool.Tool, error) {
 	return newTool("question",
-		`Ask the user a multiple-choice question and wait for their answer. `+
-			`Use it when a decision is genuinely the user's to make: a fork in the approach, a priority call, `+
-			`or a missing requirement you cannot settle from the code or the task alone. `+
-			`List 1-8 concrete, mutually exclusive options; allow_free_text (default true) lets the user type `+
-			`a different answer instead. `+
-			`Do NOT use it for anything you can verify yourself with the other tools (read, grep, bash) — check first, ask only what remains. `+
-			`Do NOT use it to ask permission to act: tool approval is the permission system's job, not a question. `+
-			`In a non-interactive session the tool does not block: it returns selected="canceled" with a note — `+
-			`treat that as "no one to ask": decide from context and proceed. `+
-			`If the user does not answer within the timeout the tool also returns selected="canceled" — proceed on your own.`,
+		`Ask the user a multiple-choice question and wait for the answer. Only for decisions that are genuinely the user's: a fork in approach, a priority call, a missing requirement. Give 1-8 concrete, mutually exclusive options; allow_free_text (default true) allows a typed answer. Never for what you can verify yourself (read, grep, bash), never to ask permission — approval is the permission system's job. Non-interactive sessions and timeouts return selected="canceled" + note: decide from context and proceed.`,
 		func(ac agent.Context, in QuestionInput) (QuestionOutput, error) {
 			if err := validateQuestionInput(in); err != nil {
 				return QuestionOutput{}, err

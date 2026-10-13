@@ -47,7 +47,7 @@ type GitOverviewOutput struct {
 }
 
 func newGitOverviewTool(sb *Sandbox) (tool.Tool, error) {
-	return newTool("git-overview", "Get an overview of the current git repository: branch, recent commits, staged/unstaged/untracked files, and upstream status.", func(ctx agent.Context, input GitOverviewInput) (GitOverviewOutput, error) {
+	return newTool("git-overview", "Git repo overview: branch, recent commits, staged/unstaged/untracked files, upstream status.", func(ctx agent.Context, input GitOverviewInput) (GitOverviewOutput, error) {
 		return gitOverviewHandler(sb, ctx, input)
 	})
 }

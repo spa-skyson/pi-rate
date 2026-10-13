@@ -153,10 +153,7 @@ func validateTodos(items []TodoItem) error {
 // notifier, when non-nil, is called after every successful write with the new state.
 func newTodoWriteTool(sessionID string, notifier func(TodoState)) (tool.Tool, error) {
 	return newTool("todo_write",
-		`Create or replace the session's todo/plan list. Each item has "content" and "status" `+
-			`(status: pending, in_progress, or completed). This is a FULL REPLACEMENT. `+
-			`The entire list of todos replaces whatever was saved before — items you omit are removed. `+
-			`Use for multi-step planning: plan first, then mark items as in_progress and completed as you work.`,
+		`Create or replace the session's todo list. Each item: {content, status: pending|in_progress|completed}. FULL REPLACEMENT — omitted items are deleted. Plan multi-step work first, then update statuses as you go.`,
 		func(_ agent.Context, input TodoWriteInput) (TodoWriteOutput, error) {
 			if err := validateTodos(input.Todos); err != nil {
 				return TodoWriteOutput{}, err

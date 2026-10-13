@@ -33,9 +33,7 @@ type GitFileDiffOutput struct {
 }
 
 func newGitFileDiffTool(sb *Sandbox) (tool.Tool, error) {
-	return newTool("git-file-diff", `Get the unified diff for a specific file.
-
-file is relative to the repo root. Set staged for the cached diff.`, func(ctx agent.Context, input GitFileDiffInput) (GitFileDiffOutput, error) {
+	return newTool("git-file-diff", `Unified diff for one file. file is repo-root-relative; staged gives the cached diff.`, func(ctx agent.Context, input GitFileDiffInput) (GitFileDiffOutput, error) {
 		return gitFileDiffHandler(sb, ctx, input)
 	})
 }

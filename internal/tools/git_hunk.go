@@ -39,7 +39,7 @@ type GitHunkOutput struct {
 }
 
 func newGitHunkTool(sb *Sandbox) (tool.Tool, error) {
-	return newTool("git-hunk", "Get parsed diff hunks for a specific file. Each hunk includes its header, content, and line count statistics.", func(ctx agent.Context, input GitHunkInput) (GitHunkOutput, error) {
+	return newTool("git-hunk", "Parsed diff hunks for one file: header, content, line stats per hunk.", func(ctx agent.Context, input GitHunkInput) (GitHunkOutput, error) {
 		return gitHunkHandler(sb, ctx, input)
 	})
 }

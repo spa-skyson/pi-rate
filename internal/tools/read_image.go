@@ -105,13 +105,7 @@ type ReadImageOutput struct {
 }
 
 func newReadImageTool(sb *Sandbox) (tool.Tool, error) {
-	return newTool("read_image", `Read an image and make it visible to the model (vision).
-
-Use this after a screenshot has been saved to disk, or to inspect a remote image by URL.
-
-Required: file_path — either an absolute/sandbox-relative path to a local image, or an https:// URL to a remote image. Absolute paths outside the working directory are allowed.
-
-URL fetching is gated by a conservative egress policy: only https, only public hosts. http://, loopback, private networks, link-local, and multicast destinations are all rejected.`, func(_ agent.Context, input ReadImageInput) (ReadImageOutput, error) {
+	return newTool("read_image", `Read an image and make it visible to the model (vision) — a saved screenshot or a remote image. file_path: local path (absolute paths outside the working directory are allowed) or https:// URL. URL fetches are egress-restricted to https public hosts — http, loopback, private, link-local and multicast are rejected.`, func(_ agent.Context, input ReadImageInput) (ReadImageOutput, error) {
 		return readImageHandler(sb, input)
 	}, map[string]string{"path": "file_path"})
 }
