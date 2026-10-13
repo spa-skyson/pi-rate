@@ -34,7 +34,7 @@ type MemSearchOutput struct {
 
 func newMemSearchTool(store memory.Store) (tool.Tool, error) {
 	return newTool("mem-search",
-		"Search past observations using full-text search. Returns a compact table with IDs, titles, and types. Use mem-get to fetch full details.",
+		"Full-text search over past observations; returns a table of IDs, titles, types. Fetch details with mem-get.",
 		func(ctx agent.Context, input MemSearchInput) (MemSearchOutput, error) {
 			return memSearchHandler(ctx, store, input)
 		})

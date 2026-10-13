@@ -136,17 +136,15 @@ const (
 // PowerShell, which rejects bash syntax like `&&`, so the model has to be told
 // which shell it is writing for. The backgrounding contract and the units are
 // the same either way, so they are stated once.
-const bashLead = `Execute a shell command and return its output. Commands run in a bash shell. Use for system operations, tests, builds, git, etc.`
+const bashLead = `Run a shell command and return its output (system ops, tests, builds, git).`
 
-const powershellLead = `Execute a shell command and return its output. Commands run through powershell.exe -NoProfile -Command; this machine has no bash. Write PowerShell syntax: ; or a newline instead of &&, Test-Path instead of test -f, Get-ChildItem instead of ls. Native tools (git, go, curl.exe) work as usual.`
+const powershellLead = `Run a shell command and return its output. Commands go through powershell.exe -NoProfile -Command (no bash): use ; or a newline instead of &&, Test-Path instead of test -f, Get-ChildItem instead of ls. Native tools (git, go, curl.exe) work as usual.`
 
 const bashLimits = `
 
-A command that outlives its timeout (60s), or goes 90s with no output, is backgrounded rather than killed: the result carries running=true and a handle. Raise timeout for work you already know is long — a full test suite, an image build. Use bash_wait to read more output and bash_kill to stop it; a handle with no output at all means the command is too broad.
+Past its timeout (60s) or 90s silent, a command is backgrounded, not killed: result has running=true and a handle — bash_wait reads more output, bash_kill stops it; an empty handle result means the command is too broad. For known-long work raise timeout; for very long runs let the handoff happen and follow with one generous bash_wait (wait_sec up to 600) instead of re-running or polling.
 
-For a run longer than any timeout, the background is the intended place, not a workaround: let the handoff happen, then follow it with one generous bash_wait (wait_sec up to 600) instead of re-running the command or polling in a loop. Each bash_wait returns as soon as there is new output or the command exits.
-
-timeout, idle_timeout and wait_sec are in SECONDS, capped at 600. Write 300 for five minutes, not 300000.`
+timeout, idle_timeout, wait_sec: SECONDS, capped at 600 — write 300, not 300000.`
 
 func executeDescription() string {
 	if CurrentShellKind() == "powershell" {
@@ -273,7 +271,7 @@ func controlToolName(command string) string {
 // builds its own supervisor and never streams need not carry the extra schema.
 func BashControlTools(sup *BashSupervisor) ([]tool.Tool, error) {
 	waitTool, err := newTool("bash_wait",
-		"Wait on a backgrounded shell command and return whatever it produced since the last wait. Blocks up to 60 seconds (wait_sec, capped at 600) for new output or for the command to exit, returning early the moment either happens; a generous wait_sec — 300 to 600 — is how you follow a long test suite or build with a single call. Returns running=false and the exit code once it finishes, after which the handle is spent. Wait once with a generous wait_sec rather than calling this in a loop — each call is a round trip, and an empty result means nothing new since the last one, not that the command is stuck.",
+		"Wait on a backgrounded command; returns output since the last wait. Blocks up to 60s (wait_sec, capped at 600), returning early on new output or exit. Prefer one generous wait_sec (300-600) over looping — each call is a round trip, and an empty result means nothing new, not a stuck command. When done: running=false plus the exit code; the handle is spent.",
 		func(_ agent.Context, input BashWaitInput) (BashStatus, error) {
 			if input.Handle == "" {
 				return BashStatus{}, fmt.Errorf("handle is required (running: %v)", sup.Handles())
@@ -285,7 +283,7 @@ func BashControlTools(sup *BashSupervisor) ([]tool.Tool, error) {
 	}
 
 	killTool, err := newTool("bash_kill",
-		"Stop a backgrounded shell command and every process it spawned. Returns any output produced since the last read.",
+		"Stop a backgrounded command and its whole process tree; returns output since the last read.",
 		func(_ agent.Context, input BashKillInput) (BashStatus, error) {
 			if input.Handle == "" {
 				return BashStatus{}, fmt.Errorf("handle is required (running: %v)", sup.Handles())

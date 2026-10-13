@@ -130,7 +130,7 @@ func newGrepTool(sb *Sandbox) (tool.Tool, error) {
 	if rgAvailable {
 		grepToolName = "ripgrep"
 	}
-	return newTool(grepToolName, "Search file contents using a regex pattern. Supports glob filtering and case-insensitive search. Returns matching lines with file paths and line numbers.", func(_ agent.Context, input GrepInput) (GrepOutput, error) {
+	return newTool(grepToolName, "Search file contents with a regex. Options: glob filter, case-insensitive. Returns matching lines with file paths and line numbers.", func(_ agent.Context, input GrepInput) (GrepOutput, error) {
 		return grepHandler(sb, input)
 	})
 }

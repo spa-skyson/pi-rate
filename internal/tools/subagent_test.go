@@ -396,14 +396,14 @@ func TestBuildSubagentDescription(t *testing.T) {
 	orch := subagent.NewOrchestrator(defaultConfigPtr(), "", agents)
 
 	desc := buildSubagentDescription(orch)
-	if !strings.Contains(desc, "Single") {
-		t.Error("description should mention Single mode")
+	if !strings.Contains(desc, "single:") {
+		t.Error("description should mention single mode")
 	}
-	if !strings.Contains(desc, "Parallel") {
-		t.Error("description should mention Parallel mode")
+	if !strings.Contains(desc, "parallel:") {
+		t.Error("description should mention parallel mode")
 	}
-	if !strings.Contains(desc, "Chain") {
-		t.Error("description should mention Chain mode")
+	if !strings.Contains(desc, "chain:") {
+		t.Error("description should mention chain mode")
 	}
 	// Agent names should be listed (order may vary).
 	if !strings.Contains(desc, "explore") {
@@ -415,10 +415,10 @@ func TestBuildSubagentDescription(t *testing.T) {
 	if !strings.Contains(desc, "task [worktree]") {
 		t.Error("description should mark worktree agents")
 	}
-	if !strings.Contains(desc, "not applied to the current tree") {
+	if !strings.Contains(desc, "never land in this tree") {
 		t.Error("description should explain worktree edits are not automatically applied")
 	}
-	if !strings.Contains(desc, "exact patch/file list") {
+	if !strings.Contains(desc, "exact patch or file list") {
 		t.Error("description should explain the handoff needed for worktree edits")
 	}
 }

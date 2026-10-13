@@ -210,17 +210,11 @@ func SubagentTools(orch *subagent.Orchestrator, onEvent SubagentEventCallback) (
 		return nil, err
 	}
 
-	ar, err := newTool("agent_result", `Collect the result of a background subagent spawned with background:true.
+	ar, err := newTool("agent_result", `Collect the result of a background subagent (one spawned with background:true).
 
-Input:
-  agent_id: string — the agent_id returned by subagent when background:true was set
-  wait_seconds: float — optional, wait up to this many seconds for the agent to finish (max 30)
+agent_id: the id the subagent call returned. wait_seconds: optional, max 30 — block for completion.
 
-When the agent is still running:
-  - Without wait_seconds: returns {status:"running", hint:"call again with wait_seconds"}
-  - With wait_seconds: waits up to min(wait_seconds, 30) seconds, returns {status:"running"} on timeout
-
-When the agent is done: returns {status, result, error} with the full result.`,
+Still running: without wait_seconds → {status:"running", hint}; with it → waits up to 30s, {status:"running"} on timeout. Done: {status, result, error}.`,
 		func(ctx agent.Context, input agentResultInput) (agentResultOutput, error) {
 			return agentResultHandler(bg, input)
 		},
@@ -235,25 +229,15 @@ When the agent is done: returns {status, result, error} with the full result.`,
 // buildSubagentDescription generates the tool description with available agent names.
 func buildSubagentDescription(orch *subagent.Orchestrator) string {
 	var b strings.Builder
-	b.WriteString(`Spawn a subagent to perform a task autonomously.
+	b.WriteString(`Spawn a subagent to perform a task autonomously. One mode per call:
+- single: {agent: "<name>", task: "<prompt>"}
+- background: add background:true — returns at once; collect with agent_result(agent_id), optionally wait_seconds
+- parallel: {tasks: [{agent, task}, ...]} — concurrent, max 8 per call
+- chain: {chain: [{agent, task}, ...]} — sequential; each task may reference {previous}
 
-Modes:
-- Single: {agent: "<name>", task: "<prompt>"} — spawn one agent
-- Single + background: {agent: "<name>", task: "<prompt>", background: true} — spawn and return immediately; collect with agent_result(agent_id)
-- Parallel: {tasks: [{agent: "<name>", task: "<prompt>"}, ...]} — run multiple agents concurrently (max 8)
-- Chain: {chain: [{agent: "<name>", task: "<prompt>"}, ...]} — run agents sequentially, passing results forward
+Background suits long independent work. [worktree] agents edit an isolated git worktree; their edits never land in this tree — ask for an exact patch or file list.
 
-Use background for long-running, independent tasks that do not block further work. The agent_result tool retrieves the result: call agent_result({agent_id: "<id>"}) to check status, or agent_result({agent_id: "<id>", wait_seconds: 10}) to wait up to 10 seconds for completion.
-
-Worktree agents:
-- Agents marked [worktree] edit an isolated git worktree; their edits are not applied to the current tree. Ask for an exact patch/file list to apply, or use a non-worktree editing agent.
-
-Reviewing a committed change (single mode, base):
-- A worktree is created at HEAD, so an agent sent to review an already-committed change sees a clean tree and an empty diff. Pass base to compare against that commit instead:
-  {agent: "captain", task: "...", base: "main"}
-- The worktree holds the current tip with its index at base, so the agent sees base..HEAD as a pending diff via git diff, and reads post-change file content.
-- This works for read-only agents too: base creates the worktree even when the agent's own definition sets none, which is what makes a read-only reviewer usable.
-- Reviewing a branch before merging: pass its merge base. For a pull request merged long ago, base alone compares against the current tip, so check that commit out first if you need exactly that diff.
+base (single mode): a worktree starts at HEAD, so a committed change reads as an empty diff. Pass base:"<ref>" to compare against it — the agent sees base..HEAD as a pending diff and reads post-change files; works for read-only agents too. For a branch use its merge base (a long-merged PR needs the commit checked out: base compares against the current tip).
 
 `)
 
