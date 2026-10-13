@@ -250,6 +250,13 @@ func (m *model) renderSessionsPopup() string {
 	rows := m.slots
 	height := popup.height
 	scrollOff := popup.scrollOff
+	// Clamp the window before anything else: when every row fits
+	// (len(rows) <= height) the only correct window is the top — the half
+	// of states the in-if clamp never reached — and a past-cap offset has
+	// no business anywhere.
+	if maxOff := len(rows) - height; maxOff <= 0 || scrollOff > maxOff {
+		scrollOff = max(0, maxOff)
+	}
 	if len(rows) > height {
 		// Defense in depth over clampSelection: the render must survive
 		// whatever the state says, never panic on a stale window.

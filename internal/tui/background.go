@@ -680,8 +680,6 @@ func (m *model) cancelBackgroundSlot(bg *backgroundRun) tea.Cmd {
 	return cmd
 }
 
-// cancelAllBackgroundSlots stops every live slot — the Ctrl+C quit path:
-// nothing survives into quit with a loop still writing.
 // cancelAllBackgroundSlots stops every live slot — the Ctrl+C quit path.
 // Each slot's inbox is emptied BEFORE the cancel: finishSlotRun restarts a
 // slot's own queue on finalize, and without the drain the first Ctrl+C
