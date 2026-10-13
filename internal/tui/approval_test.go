@@ -20,7 +20,7 @@ func newApprovalModel(t *testing.T) (*model, *permission.ApprovalRequest) {
 	m := &model{width: 140, height: 30}
 	m.agentCh = make(chan agentMsg, 8)
 	// The bridge channel, so the handler's re-arm produces a real command.
-	m.cfg.ApprovalCh = make(chan permission.ApprovalRequest, 1)
+	m.cfg.ApprovalCh = make(chan SessionApproval, 1)
 	req := permission.ApprovalRequest{
 		Tool:    "bash",
 		Command: "git push --force origin main",
@@ -33,7 +33,7 @@ func newApprovalModel(t *testing.T) (*model, *permission.ApprovalRequest) {
 func TestApprovalRequest_ShowsDialogAndRenders(t *testing.T) {
 	m, req := newApprovalModel(t)
 
-	model, cmd := m.handleApprovalRequest(approvalRequestMsg{req: *req})
+	model, cmd := m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 	if model != m {
 		t.Fatal("handler must return the same model")
 	}
@@ -81,12 +81,12 @@ func TestApprovalRequest_ShowsDialogAndRenders(t *testing.T) {
 
 func TestApprovalRequest_SecondReplacesFirstWithDenial(t *testing.T) {
 	m, first := newApprovalModel(t)
-	if _, _ = m.handleApprovalRequest(approvalRequestMsg{req: *first}); m.approval == nil || m.approval.Tool != "bash" {
+	if _, _ = m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *first, SessionID: "sess-a"}}); m.approval == nil || m.approval.Tool != "bash" {
 		t.Fatal("first request not active")
 	}
 
 	second := permission.ApprovalRequest{Tool: "edit", Reply: make(chan permission.ApprovalResult, 1)}
-	m.handleApprovalRequest(approvalRequestMsg{req: second})
+	m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: second, SessionID: "sess-a"}})
 
 	select {
 	case got := <-first.Reply:
@@ -120,7 +120,7 @@ func TestApprovalKey_Answers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, req := newApprovalModel(t)
-			m.handleApprovalRequest(approvalRequestMsg{req: *req})
+			m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 
 			_, _, handled := m.handleApprovalKey(tt.key)
 			if !handled {
@@ -160,7 +160,7 @@ func TestApprovalKey_FactLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, req := newApprovalModel(t)
-			m.handleApprovalRequest(approvalRequestMsg{req: *req})
+			m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 			m.handleApprovalKey(tt.key)
 
 			last := m.chatModel.Messages[len(m.chatModel.Messages)-1]
@@ -173,7 +173,7 @@ func TestApprovalKey_FactLines(t *testing.T) {
 
 func TestApprovalKey_OtherKeysFallThrough(t *testing.T) {
 	m, req := newApprovalModel(t)
-	m.handleApprovalRequest(approvalRequestMsg{req: *req})
+	m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 
 	// A key the dialog does not own reaches the prompt input untouched.
 	if _, _, handled := m.handleApprovalKey(tea.Key{Code: 'x'}); handled {
@@ -194,7 +194,7 @@ func TestApprovalKey_OtherKeysFallThrough(t *testing.T) {
 // typed so far is preserved rather than sent to the agent.
 func TestApprovalKey_EnterDoesNotSubmitInput(t *testing.T) {
 	m, req := newApprovalModel(t)
-	m.handleApprovalRequest(approvalRequestMsg{req: *req})
+	m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 	m.inputModel.SetText("draft that must survive")
 
 	model, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -221,7 +221,7 @@ func TestApprovalKey_EnterDoesNotSubmitInput(t *testing.T) {
 
 func TestAgentDone_DismissesPendingApproval(t *testing.T) {
 	m, req := newApprovalModel(t)
-	m.handleApprovalRequest(approvalRequestMsg{req: *req})
+	m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 
 	m.handleAgentDone(agentDoneMsg{})
 
@@ -250,7 +250,7 @@ func TestAgentDone_ApprovalNoticeContent(t *testing.T) {
 	t.Run("empty command names the tool only", func(t *testing.T) {
 		m, req := newApprovalModel(t)
 		req.Command = ""
-		m.handleApprovalRequest(approvalRequestMsg{req: *req})
+		m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 
 		m.handleAgentDone(agentDoneMsg{})
 
@@ -264,7 +264,7 @@ func TestAgentDone_ApprovalNoticeContent(t *testing.T) {
 	t.Run("long command is truncated", func(t *testing.T) {
 		m, req := newApprovalModel(t)
 		req.Command = strings.Repeat("x", 100)
-		m.handleApprovalRequest(approvalRequestMsg{req: *req})
+		m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: *req, SessionID: "sess-a"}})
 
 		m.handleAgentDone(agentDoneMsg{})
 

@@ -11,6 +11,7 @@ import (
 	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/testenv"
 	"github.com/spa-skyson/pi-rate/internal/tools"
+	"github.com/spa-skyson/pi-rate/internal/tui"
 )
 
 // TestNonInteractiveRuntime_QuestionHeadless is the #32 guard for the
@@ -73,8 +74,8 @@ func TestDeferredInitCoreTools_QuestionWiring(t *testing.T) {
 		res := &initResources{}
 		t.Cleanup(res.cleanup)
 
-		questionCh := make(chan tools.QuestionRequest, 1)
-		core, err := deferredInitCoreTools(root, root, "sess-q", nil, questionCh, res)
+		questionCh := make(chan tui.SessionQuestion, 1)
+		core, err := deferredInitCoreTools(root, root, "sess-q", "sess-q", nil, questionCh, res)
 		if err != nil {
 			t.Fatalf("deferredInitCoreTools: %v", err)
 		}
@@ -107,8 +108,8 @@ func TestDeferredInitCoreTools_QuestionWiring(t *testing.T) {
 		}()
 
 		select {
-		case req := <-questionCh:
-			req.Reply <- tools.QuestionAnswer{Selected: "option", Label: "yes", Index: 0}
+		case tagged := <-questionCh:
+			tagged.Req.Reply <- tools.QuestionAnswer{Selected: "option", Label: "yes", Index: 0}
 		case <-time.After(2 * time.Second):
 			t.Fatal("no request reached the question channel")
 		}
@@ -126,11 +127,11 @@ func TestDeferredInitCoreTools_QuestionWiring(t *testing.T) {
 		res := &initResources{}
 		t.Cleanup(res.cleanup)
 
-		questionCh := make(chan tools.QuestionRequest, 1)
+		questionCh := make(chan tui.SessionQuestion, 1)
 		stale := tools.QuestionRequest{Reply: make(chan tools.QuestionAnswer, 1)}
-		questionCh <- stale
+		questionCh <- tui.SessionQuestion{Req: stale, SessionID: "sess-q"}
 
-		core, err := deferredInitCoreTools(root, root, "sess-q", nil, questionCh, res)
+		core, err := deferredInitCoreTools(root, root, "sess-q", "sess-q", nil, questionCh, res)
 		if err != nil {
 			t.Fatalf("deferredInitCoreTools: %v", err)
 		}
@@ -172,11 +173,14 @@ func TestDeferredInitCoreTools_QuestionWiring(t *testing.T) {
 
 		// The fresh request took the slot; the dialog's answer completes it.
 		select {
-		case req := <-questionCh:
-			if req.Question != "The fresh one" {
-				t.Errorf("channel request = %q, want the fresh one", req.Question)
+		case tagged := <-questionCh:
+			if tagged.Req.Question != "The fresh one" {
+				t.Errorf("channel request = %q, want the fresh one", tagged.Req.Question)
 			}
-			req.Reply <- tools.QuestionAnswer{Selected: "option", Label: "yes", Index: 0}
+			if tagged.SessionID != "sess-q" {
+				t.Errorf("session tag = %q, want sess-q", tagged.SessionID)
+			}
+			tagged.Req.Reply <- tools.QuestionAnswer{Selected: "option", Label: "yes", Index: 0}
 		case <-time.After(2 * time.Second):
 			t.Fatal("fresh request did not reach the channel")
 		}
@@ -191,7 +195,7 @@ func TestDeferredInitCoreTools_QuestionWiring(t *testing.T) {
 		res := &initResources{}
 		t.Cleanup(res.cleanup)
 
-		core, err := deferredInitCoreTools(root, root, "sess-q", nil, nil, res)
+		core, err := deferredInitCoreTools(root, root, "sess-q", "sess-q", nil, nil, res)
 		if err != nil {
 			t.Fatalf("deferredInitCoreTools: %v", err)
 		}

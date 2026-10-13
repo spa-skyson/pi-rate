@@ -31,7 +31,7 @@ func TestDeferredInitCoreTools_TodoWiring(t *testing.T) {
 		res := &initResources{}
 		t.Cleanup(res.cleanup)
 
-		core, err := deferredInitCoreTools(root, root, "sess-cli", nil, nil, res)
+		core, err := deferredInitCoreTools(root, root, "sess-cli", "sess-cli", nil, nil, res)
 		if err != nil {
 			t.Fatalf("deferredInitCoreTools: %v", err)
 		}
@@ -49,7 +49,7 @@ func TestDeferredInitCoreTools_TodoWiring(t *testing.T) {
 		res := &initResources{}
 		t.Cleanup(res.cleanup)
 
-		core, err := deferredInitCoreTools(root, root, "", nil, nil, res)
+		core, err := deferredInitCoreTools(root, root, "", "", nil, nil, res)
 		if err != nil {
 			t.Fatalf("deferredInitCoreTools: %v", err)
 		}

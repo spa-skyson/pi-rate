@@ -1452,20 +1452,10 @@ func (m *model) updateSession(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		model, cmd := m.handleModelCandidates(msg)
 		return model, cmd, true
 	case approvalRequestMsg:
-		// Detached, the dialog does not open: the request waits in the bg
-		// stash behind a notice, and attach opens it (background.go).
-		if m.bgAlive() {
-			model, cmd := m.handleBackgroundApproval(msg)
-			return model, cmd, true
-		}
-		model, cmd := m.handleApprovalRequest(msg)
+		model, cmd := m.routeApproval(msg)
 		return model, cmd, true
 	case questionRequestMsg:
-		if m.bgAlive() {
-			model, cmd := m.handleBackgroundQuestion(msg)
-			return model, cmd, true
-		}
-		model, cmd := m.handleQuestionRequest(msg)
+		model, cmd := m.routeQuestion(msg)
 		return model, cmd, true
 	case backgroundTickMsg:
 		// Repaints the detached run's elapsed-time field; dies with the run.
@@ -1475,6 +1465,63 @@ func (m *model) updateSession(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	return nil, nil, false
+}
+
+// routeApproval sends one approval request to the session that raised it.
+// The tag is the whole route: the active session's dialog opens here; a
+// background session's request stashes behind a notice (background.go);
+// anything else — an empty tag is a factory bug, an unknown tag a dead
+// slot's late arrival — is denied and logged, never routed by guesswork.
+// Every branch re-arms the single parked reader on ApprovalCh.
+func (m *model) routeApproval(msg approvalRequestMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.sa.SessionID == "":
+		if msg.sa.Req.Reply != nil {
+			msg.sa.Req.Reply <- permission.ApprovalResult{}
+		}
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Errorf("approval request without a session tag — denied (tool %s)", msg.sa.Req.Tool)
+		}
+		return m, waitForApproval(m.cfg.ApprovalCh)
+	case m.bg != nil && msg.sa.SessionID == m.bg.sessionID && !m.bg.done:
+		return m.handleBackgroundApproval(msg)
+	case msg.sa.SessionID != m.cfg.SessionID:
+		if msg.sa.Req.Reply != nil {
+			msg.sa.Req.Reply <- permission.ApprovalResult{}
+		}
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Errorf("approval request for unknown session %s — denied (tool %s)", msg.sa.SessionID, msg.sa.Req.Tool)
+		}
+		return m, waitForApproval(m.cfg.ApprovalCh)
+	default:
+		return m.handleApprovalRequest(msg)
+	}
+}
+
+// routeQuestion is routeApproval's twin for the question tool.
+func (m *model) routeQuestion(msg questionRequestMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.sq.SessionID == "":
+		if msg.sq.Req.Reply != nil {
+			msg.sq.Req.Reply <- tools.QuestionAnswer{Selected: "canceled"}
+		}
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Errorf("question request without a session tag — canceled (%s)", truncateLabel(msg.sq.Req.Question, 60))
+		}
+		return m, waitForQuestion(m.cfg.QuestionCh)
+	case m.bg != nil && msg.sq.SessionID == m.bg.sessionID && !m.bg.done:
+		return m.handleBackgroundQuestion(msg)
+	case msg.sq.SessionID != m.cfg.SessionID:
+		if msg.sq.Req.Reply != nil {
+			msg.sq.Req.Reply <- tools.QuestionAnswer{Selected: "canceled"}
+		}
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Errorf("question request for unknown session %s — canceled", msg.sq.SessionID)
+		}
+		return m, waitForQuestion(m.cfg.QuestionCh)
+	default:
+		return m.handleQuestionRequest(msg)
+	}
 }
 
 // handleMemoryTick stores the latest memory palace status and reschedules the
@@ -3247,6 +3294,7 @@ func (m *model) handleInitEvent(msg initEventMsg) (tea.Model, tea.Cmd) {
 		m.cfg.SkillDirs = r.SkillDirs
 		m.cfg.GenerateCommitMsg = r.GenerateCommitMsg
 		m.cfg.AgentEventCh = r.AgentEventCh
+		m.cfg.NewSessionAgent = r.NewSessionAgent
 		// Remembered before the assignment: a front end that handed the same
 		// channel to the initial config already has a reader waiting on it,
 		// and arming a second would leave two goroutines blocked on one

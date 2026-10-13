@@ -18,7 +18,9 @@ func newQuestionModel(t *testing.T) (*model, *tools.QuestionRequest) {
 	t.Helper()
 	m := &model{width: 140, height: 30}
 	m.agentCh = make(chan agentMsg, 8)
-	m.cfg.QuestionCh = make(chan tools.QuestionRequest, 1)
+	m.cfg.QuestionCh = make(chan SessionQuestion, 1)
+	// Requests route by tag: the dialog only opens for the active session.
+	m.cfg.SessionID = "sess-q"
 	req := tools.QuestionRequest{
 		Question: "Which approach should we take?",
 		Options: []tools.QuestionOption{
@@ -34,7 +36,7 @@ func newQuestionModel(t *testing.T) (*model, *tools.QuestionRequest) {
 func TestQuestionRequest_ShowsDialogAndRenders(t *testing.T) {
 	m, req := newQuestionModel(t)
 
-	model, cmd := m.handleQuestionRequest(questionRequestMsg{req: *req})
+	model, cmd := m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 	if model != m {
 		t.Fatal("handler must return the same model")
 	}
@@ -68,7 +70,7 @@ func TestQuestionRequest_ShowsDialogAndRenders(t *testing.T) {
 func TestQuestionRequest_NoFreeTextRowWhenOff(t *testing.T) {
 	m, req := newQuestionModel(t)
 	req.AllowFreeText = false
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	view := m.renderQuestionDialog(m.chatWidth())
 	if strings.Contains(view, "[t] Write your own…") {
@@ -88,7 +90,7 @@ func TestQuestionRequest_NoFreeTextRowWhenOff(t *testing.T) {
 func TestUpdateRoutesQuestionRequest(t *testing.T) {
 	m, req := newQuestionModel(t)
 
-	model, cmd := m.Update(questionRequestMsg{req: *req})
+	model, cmd := m.Update(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 	if model != m {
 		t.Fatal("Update must return the same model")
 	}
@@ -105,7 +107,7 @@ func TestUpdateRoutesQuestionRequest(t *testing.T) {
 
 func TestQuestionKey_NavigationAndDigits(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	// j/down move down and clamp; k/up move back and clamp.
 	if _, _, handled := m.handleQuestionKey(tea.Key{Code: 'j'}); !handled || m.question.sel != 1 {
@@ -139,7 +141,7 @@ func TestQuestionKey_NavigationAndDigits(t *testing.T) {
 
 func TestQuestionKey_EnterConfirmsSelectedOption(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 	m.handleQuestionKey(tea.Key{Code: '2'})
 
 	_, _, handled := m.handleQuestionKey(tea.Key{Code: tea.KeyEnter})
@@ -172,7 +174,7 @@ func TestQuestionKey_EnterConfirmsSelectedOption(t *testing.T) {
 
 func TestQuestionKey_EscCancels(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	if _, _, handled := m.handleQuestionKey(tea.Key{Code: tea.KeyEsc}); !handled {
 		t.Fatal("dialog must own Esc")
@@ -196,7 +198,7 @@ func TestQuestionKey_EscCancels(t *testing.T) {
 
 func TestQuestionKey_OtherKeysFallThrough(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	// A key the dialog does not own reaches the prompt input untouched —
 	// approval's contract. Ctrl+C among them: canceling the turn must stay
@@ -218,7 +220,7 @@ func TestQuestionKey_OtherKeysFallThrough(t *testing.T) {
 
 func TestQuestionKey_FreeTextFlow(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	// t opens the editor.
 	if _, _, handled := m.handleQuestionKey(tea.Key{Code: 't'}); !handled || !m.question.free {
@@ -268,7 +270,7 @@ func TestQuestionKey_FreeTextFlow(t *testing.T) {
 
 func TestQuestionKey_FreeTextEmptyEnterIgnored(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 	m.handleQuestionKey(tea.Key{Code: 't'})
 
 	if _, _, handled := m.handleQuestionKey(tea.Key{Code: tea.KeyEnter}); !handled {
@@ -286,7 +288,7 @@ func TestQuestionKey_FreeTextEmptyEnterIgnored(t *testing.T) {
 
 func TestQuestionRequest_SecondReplacesFirstWithCanceled(t *testing.T) {
 	m, first := newQuestionModel(t)
-	if _, _ = m.handleQuestionRequest(questionRequestMsg{req: *first}); m.question == nil {
+	if _, _ = m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *first, SessionID: "sess-q"}}); m.question == nil {
 		t.Fatal("first request not active")
 	}
 
@@ -295,7 +297,7 @@ func TestQuestionRequest_SecondReplacesFirstWithCanceled(t *testing.T) {
 		Options:  []tools.QuestionOption{{Label: "yes"}},
 		Reply:    make(chan tools.QuestionAnswer, 1),
 	}
-	m.handleQuestionRequest(questionRequestMsg{req: second})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: second, SessionID: "sess-q"}})
 
 	select {
 	case got := <-first.Reply:
@@ -312,7 +314,7 @@ func TestQuestionRequest_SecondReplacesFirstWithCanceled(t *testing.T) {
 
 func TestAgentDone_DismissesPendingQuestion(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	m.handleAgentDone(agentDoneMsg{})
 
@@ -337,7 +339,7 @@ func TestAgentDone_DismissesPendingQuestion(t *testing.T) {
 func TestAgentDone_QuestionNoticeTruncatesLongText(t *testing.T) {
 	m, req := newQuestionModel(t)
 	req.Question = strings.Repeat("в", 80)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	m.handleAgentDone(agentDoneMsg{})
 
@@ -362,9 +364,9 @@ func TestQuestionListener_NilChannel(t *testing.T) {
 // sits on top, and the survivor keeps working after the top one closes.
 func TestQuestionAndApproval_OverlaysCoexist(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
-	m.cfg.ApprovalCh = make(chan permission.ApprovalRequest, 1)
+	m.cfg.ApprovalCh = make(chan SessionApproval, 1)
 	approval := permission.ApprovalRequest{Tool: "bash", Reply: make(chan permission.ApprovalResult, 1)}
 	m.approval = &approval
 	m.openOverlay(overlayApproval)
@@ -404,7 +406,7 @@ func TestRenderQuestionDialog_NarrowPanel(t *testing.T) {
 	req.Question = "This question is deliberately long so that wrapping kicks in and the truncation path is exercised properly."
 	req.Options[0].Label = "An extremely long option label that will not fit a narrow panel"
 	req.Options[0].Description = "A description long enough to wrap into several dim lines under the label."
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 
 	const budget = 44
 	view := m.renderQuestionDialog(budget)
@@ -424,7 +426,7 @@ func TestRenderQuestionDialog_NarrowPanel(t *testing.T) {
 // one of its bytes.
 func TestQuestionKey_FreeTextAcceptsNonASCII(t *testing.T) {
 	m, req := newQuestionModel(t)
-	m.handleQuestionRequest(questionRequestMsg{req: *req})
+	m.handleQuestionRequest(questionRequestMsg{sq: SessionQuestion{Req: *req, SessionID: "sess-q"}})
 	m.handleQuestionKey(tea.Key{Code: 't'}) // open the free-text editor
 
 	// A Cyrillic rune is 2 bytes; the old byte guard dropped it silently.

@@ -199,11 +199,12 @@ func TestBackground_ApprovalDetachedStashOpensOnAttach(t *testing.T) {
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
 
-	approvalCh := make(chan permission.ApprovalRequest, 4)
+	approvalCh := make(chan SessionApproval, 4)
 	m.cfg.ApprovalCh = approvalCh
+	m.bg.sessionID = "sess-bg"
 	req := permission.ApprovalRequest{Tool: "bash", Command: "rm -rf /", Reply: make(chan permission.ApprovalResult, 1)}
 
-	m.Update(approvalRequestMsg{req: req})
+	m.Update(approvalRequestMsg{sa: SessionApproval{Req: req, SessionID: "sess-bg"}})
 	if m.approval != nil {
 		t.Fatal("the approval dialog opened while the run was detached")
 	}
@@ -478,15 +479,16 @@ func TestBackground_QuestionDetachedStashOpensOnAttach(t *testing.T) {
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
 
-	questionCh := make(chan tools.QuestionRequest, 4)
+	questionCh := make(chan SessionQuestion, 4)
 	m.cfg.QuestionCh = questionCh
+	m.bg.sessionID = "sess-bg"
 	req := tools.QuestionRequest{
 		Question: "Proceed?",
 		Options:  []tools.QuestionOption{{Label: "yes"}, {Label: "no"}},
 		Reply:    make(chan tools.QuestionAnswer, 1),
 	}
 
-	m.Update(questionRequestMsg{req: req})
+	m.Update(questionRequestMsg{sq: SessionQuestion{Req: req, SessionID: "sess-bg"}})
 	if m.question != nil {
 		t.Fatal("the question dialog opened while the run was detached")
 	}

@@ -20,25 +20,26 @@ import (
 // through, so typing continues into the prompt; in free-text mode it owns
 // every key, because they all edit the answer.
 
-// questionRequestMsg carries one question from the tool.
+// questionRequestMsg carries one question from the tool, with the session
+// tag the tool's per-session notifier stamped on it (types.go).
 type questionRequestMsg struct {
-	req tools.QuestionRequest
+	sq SessionQuestion
 }
 
 // waitForQuestion parks a reader on the question channel and delivers the
 // next request as a message. Re-armed after each delivery, like
 // waitForApproval — exactly one reader is ever parked, so a channel close
 // cannot multiply wakeups.
-func waitForQuestion(ch <-chan tools.QuestionRequest) tea.Cmd {
+func waitForQuestion(ch <-chan SessionQuestion) tea.Cmd {
 	if ch == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		req, ok := <-ch
+		sq, ok := <-ch
 		if !ok {
 			return nil
 		}
-		return questionRequestMsg{req: req}
+		return questionRequestMsg{sq: sq}
 	}
 }
 
@@ -70,11 +71,11 @@ func (m *model) handleQuestionRequest(msg questionRequestMsg) (tea.Model, tea.Cm
 		// has already stopped reading, and show the new one.
 		m.question.req.Reply <- tools.QuestionAnswer{Selected: "canceled"}
 	}
-	m.question = &questionDialog{req: msg.req}
+	m.question = &questionDialog{req: msg.sq.Req}
 	m.openOverlay(overlayQuestion)
 	// Attention first: the loop is blocked until the dialog is answered, so
 	// a user who switched away needs the bell/notification to come back.
-	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Question: "+truncateLabel(msg.req.Question, 60)),
+	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Question: "+truncateLabel(msg.sq.Req.Question, 60)),
 		waitForQuestion(m.cfg.QuestionCh))
 }
 

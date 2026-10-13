@@ -54,6 +54,11 @@ type backgroundRun struct {
 	// orphans: they arrive wrapped in bgEnvelope and die in handleBgEnvelope.
 	ch chan agentMsg
 
+	// sessionID names the session this slot owns. Approval and question
+	// requests carry it as their tag — it is how the TUI tells a request
+	// from the background session's loops apart from the active session's.
+	sessionID string
+
 	// A permission/question request that arrived while detached. The agent
 	// loop is blocked until it is answered, so the stash is the run's most
 	// important state: attach opens its dialog, a dead run answers it denied.
@@ -405,9 +410,10 @@ func (m *model) handleBackgroundApproval(msg approvalRequestMsg) (tea.Model, tea
 		// first was abandoned. Fail it closed, like the foreground dialog.
 		m.bg.approval.Reply <- permission.ApprovalResult{}
 	}
-	m.bg.approval = &msg.req
-	m.chatModel.AppendNotice("Background run needs your input — Ctrl+B to attach: approval " + msg.req.Tool)
-	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Approval required: "+msg.req.Tool),
+	req := msg.sa.Req
+	m.bg.approval = &req
+	m.chatModel.AppendNotice("Background run needs your input — Ctrl+B to attach: approval " + req.Tool)
+	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Approval required: "+req.Tool),
 		waitForApproval(m.cfg.ApprovalCh))
 }
 
@@ -417,9 +423,10 @@ func (m *model) handleBackgroundQuestion(msg questionRequestMsg) (tea.Model, tea
 	if m.bg.question != nil {
 		m.bg.question.Reply <- tools.QuestionAnswer{Selected: "canceled"}
 	}
-	m.bg.question = &msg.req
-	m.chatModel.AppendNotice("Background run needs your input — Ctrl+B to attach: " + truncateLabel(msg.req.Question, 60))
-	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Question: "+truncateLabel(msg.req.Question, 60)),
+	req := msg.sq.Req
+	m.bg.question = &req
+	m.chatModel.AppendNotice("Background run needs your input — Ctrl+B to attach: " + truncateLabel(req.Question, 60))
+	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Question: "+truncateLabel(req.Question, 60)),
 		waitForQuestion(m.cfg.QuestionCh))
 }
 

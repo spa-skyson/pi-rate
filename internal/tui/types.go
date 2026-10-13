@@ -55,15 +55,23 @@ type Config struct {
 	// history, so it must never happen silently.
 	SystemNoticeCh <-chan string
 	// ApprovalCh receives tool-approval requests from the permission gate
-	// (permission ask rules). Each request blocks the agent loop until the
-	// dialog answers it via request.Reply. Nil disables the dialog: sessions
-	// without it fall back to the non-interactive denial of ask.
-	ApprovalCh <-chan permission.ApprovalRequest
-	// QuestionCh receives question requests from the question tool. Each
-	// request blocks the tool call until the dialog answers it via
-	// request.Reply. Nil keeps the tool in its headless mode: it returns
-	// canceled immediately instead of blocking.
-	QuestionCh <-chan tools.QuestionRequest
+	// (permission ask rules), tagged with the session that raised them. Each
+	// request blocks the agent loop until the dialog answers it via
+	// request.Reply. Nil disables the dialog: sessions without it fall back
+	// to the non-interactive denial of ask.
+	ApprovalCh <-chan SessionApproval
+	// QuestionCh receives question requests from the question tool, tagged
+	// with the session that asked. Each request blocks the tool call until
+	// the dialog answers it via request.Reply. Nil keeps the tool in its
+	// headless mode: it returns canceled immediately instead of blocking.
+	QuestionCh <-chan SessionQuestion
+	// NewSessionAgent, when non-nil, forks a fresh session on demand:
+	// CreateSession on the shared SessionService plus agent.New over the
+	// shared tool instances, with asker closures tagged to the new session.
+	// Ctrl+B uses it to open a brand-new session in the active slot while
+	// the running one moves whole into the background slot. Nil disables the
+	// fork — Ctrl+B refuses with a notice instead of backgrounding.
+	NewSessionAgent NewSessionAgentFunc
 	// Attention gates the terminal attention signals (bell, OSC 777
 	// notification) sent when an approval dialog opens or a long turn
 	// completes. Nil turns attention off entirely — no sequences, and focus
@@ -179,6 +187,32 @@ type Config struct {
 	ApplyUpdate func(ctx context.Context) error
 }
 
+// NewSessionAgentFunc builds a fresh agent and session for a new active
+// slot: it creates a session on the shared SessionService, then agent.New
+// over the shared tool instances with per-session asker closures tagged to
+// the new sessionID, and the autocompact pre-turn hook installed. The llm
+// argument is the active session's current model — TUI state (/model,
+// /agent) the CLI cannot snapshot at startup — so the fork lands on the
+// model the user was actually talking to.
+type NewSessionAgentFunc func(ctx context.Context, llm llmmodel.LLM) (ag *agent.Agent, sessionID, title string, err error)
+
+// SessionApproval is an approval request tagged with the session that raised
+// it. ApprovalCh is global while sessions are not: with a background session
+// running next to the active one, two live loops can block on approvals at
+// the same time, and the tag is the only thing that tells the TUI whose
+// dialog to open. An empty tag is a factory bug — the request is denied and
+// logged, never routed by guesswork.
+type SessionApproval struct {
+	Req       permission.ApprovalRequest
+	SessionID string
+}
+
+// SessionQuestion is SessionApproval's twin for the question tool.
+type SessionQuestion struct {
+	Req       tools.QuestionRequest
+	SessionID string
+}
+
 // AgentSwitch is the payload AgentSwitcher returns for one switch target.
 type AgentSwitch struct {
 	// Name is the target's agent identity, stamped onto the rebuilt runner
@@ -251,6 +285,8 @@ type InitResult struct {
 	// PrimaryAgents lists the switchable agents (mode: primary or all),
 	// sorted by name, for /agent and Shift+Tab.
 	PrimaryAgents []subagent.AgentConfig
+	// NewSessionAgent carries the session factory (see Config.NewSessionAgent).
+	NewSessionAgent NewSessionAgentFunc
 }
 
 // CompactStatsProvider provides compaction statistics for TUI display.

@@ -44,7 +44,7 @@ func TestDeferredCallbacks_DedupSeesPreCompactionBytes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sandbox.Close() })
 
-	base := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, nil, nil, nil)
+	base := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, nil, nil, nil, "sess-cbs")
 	tool := &namedToolStub{name: "git-file-diff"}
 	args := map[string]any{"file": "big.go"}
 

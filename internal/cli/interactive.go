@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -189,14 +190,16 @@ func runInteractive(
 	// Tool-approval bridge for the interactive session: the permission gate
 	// sends ask requests here and the TUI dialog answers them. The channel is
 	// created unconditionally, but the gate only consults it when the global
-	// config rules actually contain ask directives.
-	approvalCh := make(chan permission.ApprovalRequest)
+	// config rules actually contain ask directives. Requests carry the tag of
+	// the session that raised them — the asker closure stamps it — so the TUI
+	// can route a request to its own session's dialog or stash.
+	approvalCh := make(chan tui.SessionApproval)
 
 	// Question bridge, same shape: the question tool sends its request here
 	// and the TUI dialog answers it. Buffer 1 plus the TUI's parked reader
 	// keeps the tool's send non-blocking; a question arriving while one is
 	// already up displaces it (the TUI answers the stale one canceled).
-	questionCh := make(chan tools.QuestionRequest, 1)
+	questionCh := make(chan tui.SessionQuestion, 1)
 
 	go func() {
 		defer close(initDone)
@@ -333,8 +336,8 @@ func deferredInit(
 	headerSessionID string,
 	ch chan<- tui.InitEvent,
 	noticeCh chan string,
-	approvalCh chan permission.ApprovalRequest,
-	questionCh chan tools.QuestionRequest,
+	approvalCh chan tui.SessionApproval,
+	questionCh chan tui.SessionQuestion,
 	todoCh chan tools.TodoState,
 	res *initResources,
 ) {
@@ -346,15 +349,42 @@ func deferredInit(
 		ch <- tui.InitEvent{Err: err}
 	}
 
+	// --- Session service + session ID, before anything that needs the tag ---
+	//
+	// The session ID resolves first because the asker closures (approval,
+	// question) must stamp it onto every request they send: the TUI routes
+	// those requests by tag, and an untagged request is denied fail-closed.
+	// --continue/--session names an existing session; a fresh one gets the
+	// header ID when one was baked in (the LLM client is already sending it),
+	// or a generated ID otherwise. The agent records the new-session metadata
+	// later, via CreateSessionWithID on this same ID.
+	sessionsPath, sessionSvc, err := openSessionService()
+	if err != nil {
+		fail(err)
+		return
+	}
+	sessionID := flagSession
+	freshSession := sessionID == ""
+	if freshSession {
+		sessionID = headerSessionID
+		if sessionID == "" {
+			sessionID = pisession.GenerateSessionID()
+		}
+	}
+
 	// --- Phase 1: Core tools (fast, needed by everything) ---
 	send("tools", false)
 
-	coreTools, err := deferredInitCoreTools(sandboxRoot, worktreeDir, headerSessionID, todoCh, questionCh, res)
+	coreTools, err := deferredInitCoreTools(sandboxRoot, worktreeDir, headerSessionID, sessionID, todoCh, questionCh, res)
 	if err != nil {
 		fail(err)
 		return
 	}
 	sandbox, bashSup := res.sandbox, res.bashSup
+	// baseTools pins the phase-1 set: the session factory rebuilds exactly
+	// these per session (fresh ledger, session-scoped todo tools, a question
+	// tool tagged to the new session) and keeps every later append shared.
+	baseTools := coreTools
 
 	send("tools", true)
 
@@ -408,13 +438,19 @@ func deferredInit(
 
 	// Build system instruction. The parts are kept so the context gauge can
 	// attribute overhead to each section; composing them here is what keeps the
-	// breakdown honest — instruction is literally parts.String().
+	// breakdown honest — instruction is literally parts.String(). The base
+	// string is captured before defaultAgent overrides it: the session factory
+	// builds every forked session on the base prompt (the TUI re-applies the
+	// active agent over it via AgentSwitcher).
 	instructionParts := buildDeferredInstructionParts()
+	baseInstruction := instructionParts.String()
 
 	// The callback inputs are shared with the runtime agent switcher: a
 	// /agent switch rebuilds the chains from the same sandbox, LSP manager,
 	// memory recorder, deduper and compaction metrics, changing only the
-	// permission rules and the step budget.
+	// permission rules and the step budget. sessionID tags the asker
+	// closures built from it; the session factory rebinds the field per new
+	// session.
 	cbIn := callbackInputs{
 		cfg:            cfg,
 		providerName:   providerName,
@@ -422,6 +458,7 @@ func deferredInit(
 		lspMgr:         ps.lspMgr,
 		memRecorder:    memRecorder,
 		approvalCh:     approvalCh,
+		sessionID:      sessionID,
 		deduper:        tools.NewResultDeduper(),
 		compactMetrics: tools.NewCompactMetrics(),
 	}
@@ -458,13 +495,6 @@ func deferredInit(
 		}
 	}
 	instruction := instructionParts.String()
-
-	// Session service.
-	sessionsPath, sessionSvc, err := openSessionService()
-	if err != nil {
-		fail(err)
-		return
-	}
 
 	mcpToolsets := ps.mcpToolsets
 	// llms.txt documentation sources are cheap to build (no network), so they
@@ -532,7 +562,7 @@ func deferredInit(
 		return
 	}
 
-	sessionID, defaultTitle, resumed, err := resolveDeferredSession(ctx, ag, sessionSvc, llm, providerName, baseURL, headerSessionID)
+	sessionID, defaultTitle, resumed, err := resolveDeferredSession(ctx, ag, sessionSvc, llm, providerName, baseURL, sessionID, freshSession)
 	if err != nil {
 		fail(err)
 		return
@@ -574,6 +604,88 @@ func deferredInit(
 	// Commit message function.
 	commitMsgFn := buildCommitMsgFunc(ctx, cfg)
 
+	// newSessionAgent is the Ctrl+B fork: a fresh session on the shared
+	// service plus an agent over the shared tool instances, with asker
+	// closures tagged to the new session and the autocompact hook installed.
+	// Cheap by construction — agent.New wires references; sandbox, bash
+	// supervisor, orchestrator and MCP connections are never rebuilt. The
+	// llm argument is the active session's current model (TUI state), so the
+	// fork lands on the model the user was talking to.
+	newSessionAgent := func(ctx context.Context, llm adkmodel.LLM) (*agent.Agent, string, string, error) {
+		sid := pisession.GenerateSessionID()
+		// A fresh phase-1 set: private read ledger, todo tools scoped to the
+		// new session, and a question tool whose bridge tags it with sid.
+		// Everything the later appends contributed — subagent, LSP, memory,
+		// LLMS, grounding — stays shared and is carried over below.
+		freshCore, err := tools.CoreTools(sandbox,
+			tools.WithBashSupervisor(bashSup),
+			tools.WithSessionID(sid),
+			tools.WithTodoNotifier(todoStateNotifier(todoCh)),
+			tools.WithQuestionNotifier(questionBridgeNotifier(questionCh, sid)),
+		)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("building session tools: %w", err)
+		}
+		sessionTools := freshCore
+		for _, t := range coreTools {
+			if slices.Contains(baseTools, t) {
+				continue
+			}
+			sessionTools = append(sessionTools, t)
+		}
+		sessionTools = applyToolAllowlist(sessionTools)
+
+		// Chains with askers tagged to THIS session: rebind a copy of the
+		// shared inputs, never the startup's.
+		cbIn := cbIn
+		cbIn.sessionID = sid
+		cbs := cbIn.build(globalPermissionRules(cfg), flagSteps)
+
+		ag, err := agent.New(agent.Config{
+			Model:                llm,
+			Tools:                sessionTools,
+			Toolsets:             mcpToolsets,
+			Instruction:          baseInstruction,
+			SessionService:       sessionSvc,
+			Version:              versionString(),
+			BeforeToolCallbacks:  cbs.beforeTool,
+			AfterToolCallbacks:   cbs.afterTool,
+			BeforeModelCallbacks: cbs.beforeModel,
+			AfterModelCallbacks:  cbs.afterModel,
+			Logger:               sessionLog,
+		})
+		if err != nil {
+			return nil, "", "", fmt.Errorf("creating session agent: %w", err)
+		}
+		_, title, err := ag.CreateSessionWithID(ctx, sid)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("creating session: %w", err)
+		}
+		_ = sessionSvc.SetSessionProvider(sid, providerName, baseURL)
+		if logErr == nil {
+			sessionLog.SessionStart(sid, llm.Name(), providerName, provider.BackendName(provider.Info{Provider: providerName}, config.APIKeys()[providerName], baseURL), baseURL, "interactive")
+		}
+		// Same two-stage auto-compaction as the startup session: the forked
+		// session compacts its own history between turns.
+		if hook := autocompact.BuildHook(autocompact.Deps{
+			SessionSvc:    sessionSvc,
+			Tracker:       tokenTracker,
+			Deduper:       cbs.deduper,
+			Cfg:           autocompact.ConfigFrom(cfg),
+			Log:           sessionLog,
+			SummarizerLLM: llm,
+			Notify: func(msg string) {
+				select {
+				case noticeCh <- msg:
+				default:
+				}
+			},
+		}); hook != nil {
+			ag.SetPreTurnHook(hook)
+		}
+		return ag, sid, title, nil
+	}
+
 	send("agent", true)
 
 	// Send final result.
@@ -608,6 +720,9 @@ func deferredInit(
 			ProviderName:  cmp.Or(agentProvider, providerName),
 			ActiveAgent:   activeAgent,
 			PrimaryAgents: primaryAgentsFor(ps.agentConfigs),
+			NewSessionAgent: func(ctx context.Context, llm adkmodel.LLM) (*agent.Agent, string, string, error) {
+				return newSessionAgent(ctx, llm)
+			},
 		},
 	}
 
@@ -616,9 +731,53 @@ func deferredInit(
 	}
 }
 
+// todoStateNotifier returns the non-blocking todo-state forwarder — a state
+// update dropped while the TUI is busy is self-correcting, because the next
+// todo_write carries the full list again. nil when ch is nil.
+func todoStateNotifier(ch chan tools.TodoState) func(tools.TodoState) {
+	if ch == nil {
+		return nil
+	}
+	return func(s tools.TodoState) {
+		select {
+		case ch <- s:
+		default:
+		}
+	}
+}
+
+// questionBridgeNotifier wires one session's question tool to the TUI dialog:
+// every request it forwards is tagged with sessionID, which is what the TUI
+// routes by. The send must not block (a blocked send here parks the tool call
+// forever — production hang #32); the buffer-1 channel plus the TUI's parked
+// reader keep the fast path non-blocking, and a request arriving while one is
+// still queued displaces it with a canceled answer — nobody is waiting to
+// show it, and its tool call stops waiting on a Reply nobody owns.
+func questionBridgeNotifier(ch chan tui.SessionQuestion, sessionID string) func(tools.QuestionRequest) {
+	if ch == nil {
+		return nil
+	}
+	return func(req tools.QuestionRequest) {
+		select {
+		case ch <- tui.SessionQuestion{Req: req, SessionID: sessionID}:
+			return
+		default:
+		}
+		select {
+		case stale := <-ch:
+			// Reply is buffered to one: the send never blocks, even
+			// when the abandoned call has stopped reading.
+			stale.Req.Reply <- tools.QuestionAnswer{Selected: "canceled"}
+		default:
+		}
+		ch <- tui.SessionQuestion{Req: req, SessionID: sessionID}
+	}
+}
+
 // deferredInitCoreTools builds the sandbox, the bash supervisor and the core
-// tool set. Both the sandbox and the supervisor are recorded on res as soon as
-// they exist, so a later failure here still leaves them for cleanup to close.
+// tool set. Both the sandbox and the supervisor are recorded on res as soon
+// as they exist, so a later failure here still leaves them for cleanup to
+// close.
 //
 // headerSessionID registers the todo tools (todo_write/todo_read); todoCh
 // receives the aggregated state after each todo_write so the sidebar and the
@@ -627,8 +786,9 @@ func deferredInit(
 // carries the full list again.
 //
 // questionCh wires the question tool to the TUI dialog; nil keeps the tool's
-// headless mode (immediate canceled).
-func deferredInitCoreTools(sandboxRoot, worktreeDir, headerSessionID string, todoCh chan tools.TodoState, questionCh chan tools.QuestionRequest, res *initResources) ([]adktool.Tool, error) {
+// headless mode (immediate canceled). askSessionID tags every question the
+// tool raises with the session that raised it — the TUI routes by that tag.
+func deferredInitCoreTools(sandboxRoot, worktreeDir, headerSessionID, askSessionID string, todoCh chan tools.TodoState, questionCh chan tui.SessionQuestion, res *initResources) ([]adktool.Tool, error) {
 	sandbox, err := tools.NewSandbox(sandboxRoot, worktreeDir)
 	if err != nil {
 		return nil, fmt.Errorf("creating sandbox: %w", err)
@@ -644,40 +804,8 @@ func deferredInitCoreTools(sandboxRoot, worktreeDir, headerSessionID string, tod
 	bashSup := tools.NewBashSupervisor()
 	res.bashSup = bashSup
 
-	var todoNotifier func(tools.TodoState)
-	if todoCh != nil {
-		todoNotifier = func(s tools.TodoState) {
-			select {
-			case todoCh <- s:
-			default:
-			}
-		}
-	}
-	// The question notifier must not block: a blocked send here parks the
-	// tool call forever (production hang #32). The buffer-1 channel plus the
-	// TUI's parked reader make the fast path non-blocking; if the slot is
-	// still full (a delivered-but-unshown request), the stale one is
-	// displaced with a canceled answer — nobody is waiting to show it, and
-	// its tool call stops waiting on a Reply nobody owns.
-	var questionNotifier func(tools.QuestionRequest)
-	if questionCh != nil {
-		questionNotifier = func(req tools.QuestionRequest) {
-			select {
-			case questionCh <- req:
-				return
-			default:
-			}
-			select {
-			case stale := <-questionCh:
-				// Reply is buffered to one: the send never blocks, even
-				// when the abandoned call has stopped reading.
-				stale.Reply <- tools.QuestionAnswer{Selected: "canceled"}
-			default:
-			}
-			questionCh <- req
-		}
-	}
-	coreTools, err := tools.CoreTools(sandbox, coreToolOptions(bashSup, headerSessionID, todoNotifier, questionNotifier)...)
+	// The question notifier must not block: see questionBridgeNotifier.
+	coreTools, err := tools.CoreTools(sandbox, coreToolOptions(bashSup, headerSessionID, todoStateNotifier(todoCh), questionBridgeNotifier(questionCh, askSessionID))...)
 	if err != nil {
 		return nil, fmt.Errorf("creating core tools: %w", err)
 	}
@@ -830,12 +958,16 @@ type deferredCallbacks struct {
 // so the deduper and the compaction metrics stay shared across switches: the
 // auto-compact hook and the context gauge hold the original instances.
 type callbackInputs struct {
-	cfg            config.Config
-	providerName   string
-	sandbox        *tools.Sandbox
-	lspMgr         *lsp.Manager
-	memRecorder    *deferredMemoryRecorder
-	approvalCh     chan permission.ApprovalRequest
+	cfg          config.Config
+	providerName string
+	sandbox      *tools.Sandbox
+	lspMgr       *lsp.Manager
+	memRecorder  *deferredMemoryRecorder
+	approvalCh   chan tui.SessionApproval
+	// sessionID is stamped onto every asker closure build() produces: the
+	// tag the TUI routes approval and question requests by. Per-session by
+	// construction — the session factory rebinds it before each build.
+	sessionID      string
 	deduper        *tools.ResultDeduper
 	compactMetrics *tools.CompactMetrics
 }
@@ -865,7 +997,7 @@ func (in callbackInputs) build(rules permission.Rules, steps int) deferredCallba
 	// processes keep the hard denial.
 	if !rules.Empty() {
 		if in.approvalCh != nil {
-			beforeCBs = append(beforeCBs, agent.NewAskingPermissionCallback(rules, approvalAsker(in.approvalCh)))
+			beforeCBs = append(beforeCBs, agent.NewAskingPermissionCallback(rules, approvalAsker(in.approvalCh, in.sessionID)))
 		} else {
 			beforeCBs = append(beforeCBs, agent.NewPermissionCallback(rules))
 		}
@@ -920,13 +1052,16 @@ func (in callbackInputs) build(rules permission.Rules, steps int) deferredCallba
 
 // buildDeferredCallbacks assembles the callback chains for the default
 // (built-in agent) session: global permission rules and the --steps budget.
+// sessionID tags the asker closures, exactly as deferredInit's shared
+// callbackInputs does before building the startup chains.
 func buildDeferredCallbacks(
 	cfg config.Config,
 	providerName string,
 	sandbox *tools.Sandbox,
 	lspMgr *lsp.Manager,
 	memRecorder *deferredMemoryRecorder,
-	approvalCh chan permission.ApprovalRequest,
+	approvalCh chan tui.SessionApproval,
+	sessionID string,
 ) deferredCallbacks {
 	return callbackInputs{
 		cfg:            cfg,
@@ -935,20 +1070,22 @@ func buildDeferredCallbacks(
 		lspMgr:         lspMgr,
 		memRecorder:    memRecorder,
 		approvalCh:     approvalCh,
+		sessionID:      sessionID,
 		deduper:        tools.NewResultDeduper(),
 		compactMetrics: tools.NewCompactMetrics(),
 	}.build(globalPermissionRules(cfg), flagSteps)
 }
 
 // approvalAsker returns the blocking bridge the permission gate parks on for
-// each ask decision. It hands the request to the TUI dialog over ch and waits
-// for the user's answer. ctx is the agent turn's context: when the turn is
-// canceled (Ctrl+C, session exit) the wait must end in a denial rather than
-// leave the gate parked on a dialog nobody will answer. An already-canceled
-// context never reaches the dialog at all — a dead tool call must not open a
-// window. A late answer is harmless — Reply is buffered to one and simply
-// dropped.
-func approvalAsker(ch chan<- permission.ApprovalRequest) func(context.Context, permission.ApprovalRequest) permission.ApprovalResult {
+// each ask decision. It stamps the request with the sessionID of the agent
+// whose callback chain carries this closure — the tag the TUI routes by —
+// hands it to the TUI dialog over ch and waits for the user's answer. ctx is
+// the agent turn's context: when the turn is canceled (Ctrl+C, session exit)
+// the wait must end in a denial rather than leave the gate parked on a dialog
+// nobody will answer. An already-canceled context never reaches the dialog at
+// all — a dead tool call must not open a window. A late answer is harmless —
+// Reply is buffered to one and simply dropped.
+func approvalAsker(ch chan<- tui.SessionApproval, sessionID string) func(context.Context, permission.ApprovalRequest) permission.ApprovalResult {
 	return func(ctx context.Context, req permission.ApprovalRequest) permission.ApprovalResult {
 		if ctx == nil {
 			ctx = context.Background()
@@ -960,7 +1097,7 @@ func approvalAsker(ch chan<- permission.ApprovalRequest) func(context.Context, p
 			return permission.ApprovalResult{}
 		}
 		select {
-		case ch <- req:
+		case ch <- tui.SessionApproval{Req: req, SessionID: sessionID}:
 		case <-ctx.Done():
 			return permission.ApprovalResult{}
 		}
@@ -973,34 +1110,32 @@ func approvalAsker(ch chan<- permission.ApprovalRequest) func(context.Context, p
 	}
 }
 
-// resolveDeferredSession returns the session to run in — the one named by
-// --continue/--session if there is one, otherwise a fresh one — and records the
-// model and backend it is running under.
+// resolveDeferredSession resolves the session to run in and records the model
+// and backend it runs under. sessionID arrives pre-resolved — --continue/
+// --session named one, or the fresh ID was generated before the asker closures
+// were built (they stamp it onto every request). fresh selects the paths: a
+// fresh ID is created through the agent (recording the brand-new session's
+// metadata), a named one is recorded as resumed.
 func resolveDeferredSession(
 	ctx context.Context,
 	ag *agent.Agent,
 	sessionSvc *pisession.FileService,
 	llm adkmodel.LLM,
 	providerName, baseURL string,
-	headerSessionID string,
-) (sessionID, defaultTitle string, resumed bool, err error) {
-	// --continue is resolved in the fast path, which sets flagSession.
-	sessionID = flagSession
-	resumed = sessionID != ""
-	if sessionID == "" {
-		// The header ID wins when one was baked in: the LLM client is already
-		// sending it, so the session must carry the same name.
-		sessionID, defaultTitle, err = ag.CreateSessionWithID(ctx, headerSessionID)
+	sessionID string,
+	fresh bool,
+) (sid, defaultTitle string, resumed bool, err error) {
+	resumed = !fresh
+	if fresh {
+		sessionID, defaultTitle, err = ag.CreateSessionWithID(ctx, sessionID)
 		if err != nil {
 			return "", "", false, fmt.Errorf("creating session: %w", err)
 		}
-	}
-
-	// Keep the recorded model honest. meta.Model used to be written once, at
-	// creation, so a session resumed under a different model (via --model) kept
-	// advertising the old one — and the next resume would restore that instead
-	// of what the session actually last ran with.
-	if resumed {
+	} else {
+		// Keep the recorded model honest. meta.Model used to be written once,
+		// at creation, so a session resumed under a different model (via
+		// --model) kept advertising the old one — and the next resume would
+		// restore that instead of what the session actually last ran with.
 		_ = sessionSvc.SetSessionModel(sessionID, llm.Name()) // best-effort metadata
 	}
 	// Record the backend for every session, resumed or fresh. The model name on
