@@ -36,9 +36,13 @@
 # the mirror could never converge again. PI_PREPUSH_ALLOW_SERVER_MERGES=1 is
 # that exception, scoped as narrowly as PI_ALLOW_LARGE_FILES in
 # check-large-files: with it set, unsigned commits that ARE merges (two or
-# more parents) warn instead of failing. Unsigned non-merge commits still
-# fail unconditionally, the Signed-off-by and size checks are unchanged for
-# every commit, and without the variable the hook behaves exactly as before.
+# more parents) warn instead of failing and are exempt from the
+# Signed-off-by check as well — a merge commit built by the GitLab web UI
+# carries neither a user signature nor a user Signed-off-by, and neither
+# can be added without rewriting the commit. Unsigned non-merge commits
+# still fail both checks unconditionally, the size check is unchanged for
+# every commit, and without the variable the hook behaves exactly as
+# before.
 set -euo pipefail
 
 remote="$1"
@@ -94,12 +98,21 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
 
   for sha in $range; do
+    # Classify once: under the escape hatch an unsigned merge commit is
+    # warned about and skips BOTH the signature and the Signed-off-by gate
+    # — a server-built merge cannot carry a user Signed-off-by any more
+    # than it can carry a user signature.
+    server_merge=""
     if ! verify_signature "$sha"; then
       if [ -n "$allow_server_merges" ] && is_merge "$sha"; then
         server_merges+=("$sha")
+        server_merge=1
       else
         unsigned+=("$sha")
       fi
+    fi
+    if [ -n "$server_merge" ]; then
+      continue
     fi
     trailers="$(git log --format='%(trailers:key=Signed-off-by,valueonly)' -1 "$sha")"
     committer_email="$(git log --format='%ce' -1 "$sha")"
@@ -116,7 +129,7 @@ if [ "${#size_scan[@]}" -gt 0 ]; then
   "$(dirname "$0")/check-large-files" commits "${size_scan[@]}" || fail=1
 fi
 if [ "${#server_merges[@]}" -gt 0 ]; then
-  echo "pre-push: WARNING: server-side merge commits allowed by PI_PREPUSH_ALLOW_SERVER_MERGES (unsigned):" >&2
+  echo "pre-push: WARNING: server-side merge commits allowed by PI_PREPUSH_ALLOW_SERVER_MERGES (unsigned, Signed-off-by waived):" >&2
   printf '  %s\n' "${server_merges[@]}" >&2
 fi
 if [ "${#unsigned[@]}" -gt 0 ]; then

@@ -234,8 +234,10 @@ PI_PREPUSH_ALLOW_SERVER_MERGES=1 git push origin main
 
 The variable passes **only unsigned merge commits** (two or more parents) —
 they warn and go through, since server-side merges are legal per the
-paragraph above. Unsigned **non-merge** commits still fail unconditionally,
-and the Signed-off-by and size checks are unchanged for every commit.
+paragraph above; the Signed-off-by requirement is waived for them too,
+because a server-built merge carries neither a user signature nor a user
+Signed-off-by. Unsigned **non-merge** commits still fail both checks
+unconditionally, and the size check is unchanged for every commit.
 
 ### Never use `--no-verify`
 
