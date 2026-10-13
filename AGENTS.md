@@ -771,3 +771,14 @@ never silently.
   or approval dialog is open, `handleAgentDone` dismisses it and notices the
   user — a tool waiting for an answer that will never come must not wedge the
   TUI (`internal/tui/agent_loop.go:2264-2285`).
+- **At most one live main agent loop; a backgrounded run holds the agent.**
+  Ctrl+B detaches the running turn — the loop keeps working, its events buffer
+  instead of rendering — but it does not free the *agent*, only the input:
+  while the detached run is alive, new prompts queue instead of starting and
+  agent/model switches refuse, because `RebuildWithSession` and
+  `RebuildWithModel` mutate the `*Agent` in place under the live loop
+  (`internal/tui/background.go`, guards in `startNextPrompt`, `applyAgent`,
+  `handleModelCommand`). A finished background run frees the agent without an
+  attach. The channel reader never changes hands: the parked `waitForAgent`
+  command stays the only reader through detach and attach — routing, never a
+  second goroutine.
