@@ -74,6 +74,14 @@ type backgroundRun struct {
 	messages  []message
 	inbox     []queuedPrompt
 
+	// Window title and retry state follow the transcript, not the screen:
+	// the title names the session on screen, and Ctrl+R replays the prompt
+	// of the session that actually failed — never a stranger's.
+	title            string
+	lastPrompt       string
+	lastMentions     []string
+	lastPromptFailed bool
+
 	// A permission/question request that arrived while detached. The agent
 	// loop is blocked until it is answered, so the stash is the run's most
 	// important state: attach opens its dialog, a dead run answers it denied.
@@ -164,6 +172,19 @@ func shortSessionID(id string) string {
 	return id
 }
 
+// appendNotice adds a notice to the slot's transcript. The slot's close-out
+// lines belong to ITS conversation — the active session must not grow text
+// for a run it knows nothing about. Like ChatModel.AppendNotice, the notice
+// is a closed block, so the next delta of the slot's next run starts a fresh
+// block instead of absorbing it.
+func (b *backgroundRun) appendNotice(text string) {
+	b.messages = append(b.messages, message{
+		role:     "assistant",
+		content:  text,
+		isNotice: true,
+	})
+}
+
 // detachRun forks: the running session moves whole into a background slot,
 // and the factory opens a fresh session in the active slot. The loop keeps
 // running on the agent and in the session it started with — only the
@@ -187,22 +208,29 @@ func (m *model) detachRun() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.bg = &backgroundRun{
-		started:   time.Now(),
-		ch:        m.agentCh,
-		cancel:    m.agentCancel,
-		sessionID: m.cfg.SessionID,
-		agent:     m.cfg.Agent,
-		messages:  m.chatModel.Messages,
-		inbox:     m.pendingPrompts,
+		started:          time.Now(),
+		ch:               m.agentCh,
+		cancel:           m.agentCancel,
+		sessionID:        m.cfg.SessionID,
+		agent:            m.cfg.Agent,
+		messages:         m.chatModel.Messages,
+		inbox:            m.pendingPrompts,
+		title:            m.sessionTitle,
+		lastPrompt:       m.lastPrompt,
+		lastMentions:     m.lastMentions,
+		lastPromptFailed: m.lastPromptFailed,
 	}
 	m.pendingPrompts = nil
 	m.agentCh, m.agentCancel = nil, nil
-	// Fresh active session: empty transcript, fresh retry state, and the
-	// factory's default title for the window/tab.
+	// Fresh active session: empty transcript, empty retry state, and the
+	// factory's default title for the window/tab. Ctrl+R must never replay
+	// the background session's prompt into the fresh one, and the todo plan
+	// belonged to the session that just left (per-session todos are MR2).
 	m.cfg.Agent, m.cfg.SessionID = ag, sid
 	m.chatModel.Messages = make([]message, 0, 16)
 	m.chatModel.Streaming, m.chatModel.Thinking = "", ""
 	m.lastPrompt, m.lastMentions, m.lastPromptFailed = "", nil, false
+	m.todoState = nil
 	if title != "" {
 		m.sessionTitle = title
 	}
@@ -239,6 +267,12 @@ func (m *model) attachBackground() (tea.Model, tea.Cmd) {
 	if m.running {
 		return m, m.setFlash("The active session is running — attach when it finishes or cancel it first")
 	}
+	if m.mode == "plan" && m.planWorktree != nil {
+		// Symmetric with the detach refusal: plan finalization writes
+		// global model state, and swapping the session under a pending
+		// plan would finalize it into the slot's session.
+		return m, m.setFlash("Cannot attach while a plan session is active — wait for the plan to finish")
+	}
 	m.bg = nil
 
 	// Swap ownership back. What was active is dropped from the model, named
@@ -249,14 +283,30 @@ func (m *model) attachBackground() (tea.Model, tea.Cmd) {
 	m.pendingPrompts, bg.inbox = bg.inbox, nil
 	m.agentCh, m.agentCancel = bg.ch, bg.cancel
 	displaced := bg.sessionID
-	// The swapped-in transcript may end in an open assistant block — the
-	// deltas that streamed before the detach. Its content IS the streaming
-	// accumulator the live handlers extend; leaving the field empty (the
-	// fork reset it for the fresh session) would make the first replayed
-	// delta overwrite the block instead of appending to it.
-	m.chatModel.Streaming = ""
-	if n := len(m.chatModel.Messages); n > 0 && m.chatModel.Messages[n-1].role == "assistant" && !m.chatModel.Messages[n-1].closed() {
-		m.chatModel.Streaming = m.chatModel.Messages[n-1].content
+	// Retry state and window title follow the transcript back: Ctrl+R
+	// replays THIS session's failed prompt, the title names the session now
+	// on screen, and the displaced session keeps its own for its /resume.
+	m.lastPrompt, bg.lastPrompt = bg.lastPrompt, m.lastPrompt
+	m.lastMentions, bg.lastMentions = bg.lastMentions, m.lastMentions
+	m.lastPromptFailed, bg.lastPromptFailed = bg.lastPromptFailed, m.lastPromptFailed
+	m.sessionTitle, bg.title = bg.title, m.sessionTitle
+	// Todos are not slotted yet (MR2): nothing to restore for this session,
+	// and the displaced plan must not show.
+	m.todoState = nil
+	// The swapped-in transcript may end in an open assistant or thinking
+	// block — the deltas that streamed before the detach. Their contents
+	// ARE the accumulators the live handlers extend; leaving the fields
+	// empty (the fork reset them for the fresh session) would make the
+	// first replayed delta overwrite the block instead of appending to it.
+	m.chatModel.Streaming, m.chatModel.Thinking = "", ""
+	if n := len(m.chatModel.Messages); n > 0 {
+		last := m.chatModel.Messages[n-1]
+		if last.role == "assistant" && !last.closed() {
+			m.chatModel.Streaming = last.content
+		}
+		if last.role == "thinking" {
+			m.chatModel.Thinking = last.content
+		}
 	}
 
 	if bg.dropped > 0 {
@@ -411,7 +461,12 @@ func (m *model) finishSlotRun(bg *backgroundRun, done agentDoneMsg) (tea.Model, 
 	if bg.dropped > 0 {
 		skipped = fmt.Sprintf(", %d older events evicted", bg.dropped)
 	}
-	m.chatModel.AppendNotice(fmt.Sprintf(
+	// The close-out line lands in the SLOT's transcript — the conversation
+	// that actually finished. Writing it into the active transcript would
+	// grow text for a run that session knows nothing about; the active user
+	// learns of it through the status bar's done marker and the attention
+	// bell below, both slot-agnostic by design.
+	bg.appendNotice(fmt.Sprintf(
 		"Background session %s: run %s — %d events buffered%s. Ctrl+B to review.",
 		shortSessionID(bg.sessionID), label, bg.seen, skipped))
 	// External notifiers learn about the completion; the active slot's own
@@ -449,11 +504,15 @@ func (m *model) startSlotInbox(bg *backgroundRun) tea.Cmd {
 	bg.ch = ch
 	agentCtx, cancel := context.WithCancel(m.ctx)
 	bg.cancel = cancel
+	// Same snapshot rule as agentRun: the slot's loop reads its own copy —
+	// Update is free to swap m.cfg fields while it runs.
 	go m.runAgentLoop(agentCtx, wrapMentions(next.text, next.mentions), ch, agentRunConfig{
-		agent:     bg.agent,
-		sessionID: bg.sessionID,
-		sessions:  m.cfg.SessionService,
-		logger:    m.cfg.Logger,
+		agent:           bg.agent,
+		sessionID:       bg.sessionID,
+		sessions:        m.cfg.SessionService,
+		logger:          m.cfg.Logger,
+		providerName:    m.cfg.ProviderName,
+		midTurnAttempts: m.cfg.MidTurnAttempts,
 	})
 	return waitForSlotAgent(ch)
 }

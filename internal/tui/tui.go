@@ -1464,6 +1464,17 @@ func (m *model) routeApproval(msg approvalRequestMsg) (tea.Model, tea.Cmd) {
 		return m, waitForApproval(m.cfg.ApprovalCh)
 	case m.bg != nil && msg.sa.SessionID == m.bg.sessionID && !m.bg.done:
 		return m.handleBackgroundApproval(msg)
+	case m.bg != nil && msg.sa.SessionID == m.bg.sessionID:
+		// The tag is known but its run already finished: a request left in
+		// flight when the run died. Denied, and named as what it is — not
+		// "unknown session", which would point at a factory bug.
+		if msg.sa.Req.Reply != nil {
+			msg.sa.Req.Reply <- permission.ApprovalResult{}
+		}
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Errorf("approval request for a background slot that already finished (%s) — denied (tool %s)", msg.sa.SessionID, msg.sa.Req.Tool)
+		}
+		return m, waitForApproval(m.cfg.ApprovalCh)
 	case msg.sa.SessionID != m.cfg.SessionID:
 		if msg.sa.Req.Reply != nil {
 			msg.sa.Req.Reply <- permission.ApprovalResult{}
@@ -1490,6 +1501,16 @@ func (m *model) routeQuestion(msg questionRequestMsg) (tea.Model, tea.Cmd) {
 		return m, waitForQuestion(m.cfg.QuestionCh)
 	case m.bg != nil && msg.sq.SessionID == m.bg.sessionID && !m.bg.done:
 		return m.handleBackgroundQuestion(msg)
+	case m.bg != nil && msg.sq.SessionID == m.bg.sessionID:
+		// Twin of the approval branch: the slot's run is gone, the request
+		// dies with it, and the log names the real situation.
+		if msg.sq.Req.Reply != nil {
+			msg.sq.Req.Reply <- tools.QuestionAnswer{Selected: "canceled"}
+		}
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Errorf("question request for a background slot that already finished (%s) — canceled", msg.sq.SessionID)
+		}
+		return m, waitForQuestion(m.cfg.QuestionCh)
 	case msg.sq.SessionID != m.cfg.SessionID:
 		if msg.sq.Req.Reply != nil {
 			msg.sq.Req.Reply <- tools.QuestionAnswer{Selected: "canceled"}

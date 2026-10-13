@@ -963,14 +963,23 @@ type agentRunConfig struct {
 	sessionID string
 	sessions  *pisession.FileService
 	logger    *logger.Logger
+	// providerName and midTurnAttempts are loop-visible cfg reads snapshotted
+	// at start. The v1 gates made /model illegal under any live loop, so the
+	// loop could never race Update's m.cfg writes; fork-on-detach removed
+	// that gate — a slot's loop now legitimately runs while Update swaps
+	// ProviderName (and the snapshot fields generally) on the ACTIVE config.
+	providerName    string
+	midTurnAttempts *int
 }
 
 func (m *model) agentRun() agentRunConfig {
 	return agentRunConfig{
-		agent:     m.cfg.Agent,
-		sessionID: m.cfg.SessionID,
-		sessions:  m.cfg.SessionService,
-		logger:    m.cfg.Logger,
+		agent:           m.cfg.Agent,
+		sessionID:       m.cfg.SessionID,
+		sessions:        m.cfg.SessionService,
+		logger:          m.cfg.Logger,
+		providerName:    m.cfg.ProviderName,
+		midTurnAttempts: m.cfg.MidTurnAttempts,
 	}
 }
 
@@ -1198,8 +1207,8 @@ func (m *model) runAgentLoop(ctx context.Context, prompt string, ch chan agentMs
 	// attempt past the budget ends the turn through the ordinary error path,
 	// where handleAgentDone offers /retry.
 	midTurnMax := config.DefaultMidTurnAttempts
-	if m.cfg.MidTurnAttempts != nil {
-		midTurnMax = *m.cfg.MidTurnAttempts
+	if run.midTurnAttempts != nil {
+		midTurnMax = *run.midTurnAttempts
 	}
 
 	// Surface every retry — the provider re-sending a request that died under
@@ -1472,7 +1481,7 @@ func (m *model) streamTurn(
 		// the response, so surface it as a synthetic tool call/result pair,
 		// labeled for the provider that searched. Checked before the Content
 		// nil-guard, since the metadata hangs off the event, not the content.
-		m.emitGroundingEvents(ch, ev.GroundingMetadata, m.cfg.ProviderName, groundedSeen, log)
+		m.emitGroundingEvents(ch, ev.GroundingMetadata, run.providerName, groundedSeen, log)
 
 		// Note tool traffic before any of the early returns below: the
 		// forward can abort the turn (stuck detector), and an error return

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/spa-skyson/pi-rate/internal/agent"
 	"github.com/spa-skyson/pi-rate/internal/permission"
 	pisession "github.com/spa-skyson/pi-rate/internal/session"
+	"github.com/spa-skyson/pi-rate/internal/subagent"
 	"github.com/spa-skyson/pi-rate/internal/tools"
 )
 
@@ -157,6 +159,18 @@ func noticesText(m *model) string {
 	return b.String()
 }
 
+// slotNotices joins the notices of the slot's own transcript — the slot's
+// close-out lines live there, not in the active one.
+func slotNotices(bg *backgroundRun) string {
+	var b strings.Builder
+	for _, msg := range bg.messages {
+		if msg.isNotice {
+			b.WriteString(msg.content + "\n")
+		}
+	}
+	return b.String()
+}
+
 // ctrlB is the background hotkey as the terminal delivers it.
 func ctrlB() tea.Key { return tea.Key{Code: 'b', Mod: tea.ModCtrl} }
 
@@ -214,6 +228,36 @@ func drainRun(t *testing.T, m *model, cmd tea.Cmd) {
 	t.Fatal("run did not drain within the envelope budget")
 }
 
+// TestBackground_RunConfigIsSnapshotted pins the race fix: the loop
+// goroutine reads its config from the agentRunConfig snapshot, never from
+// live m.cfg — /model may rewrite m.cfg (ProviderName, MidTurnAttempts) in
+// Update while a slot's loop runs. Run with -race: the test rewrites both
+// fields while a real loop is mid-flight; a loop reading live m.cfg turns
+// this into a data race report.
+func TestBackground_RunConfigIsSnapshotted(t *testing.T) {
+	release := make(chan struct{})
+	done := make(chan struct{})
+	m := newBgTestModel(t, &heldLLM{name: "snap", release: release})
+	ch := make(chan agentMsg, 8)
+	other := 9
+	// The snapshot is taken on the caller's side — passing m.agentRun()
+	// inside the go statement would re-introduce the race it exists to
+	// prevent (the argument evaluates in the new goroutine).
+	run := m.agentRun()
+	go func() {
+		defer close(done)
+		m.runAgentLoop(context.Background(), "snap", ch, run)
+	}()
+	// The loop reads its snapshot before the model call it is now blocked
+	// in; rewrite the live fields the pre-fix code read mid-loop.
+	m.cfg.MidTurnAttempts = &other
+	m.cfg.ProviderName = "swapped-provider"
+	close(release)
+	<-done
+	// The assertion is -race staying silent; the drained channel needs no
+	// checks (buffered sends survive the test).
+}
+
 // TestBackground_DetachForksFreshSession walks the core cycle over a real
 // agent: detach mid-stream moves the session whole into the slot and opens a
 // fresh one; attach hands the slot back with the run still alive; the rest
@@ -241,10 +285,14 @@ func TestBackground_DetachForksFreshSession(t *testing.T) {
 
 	// Ctrl+B: forked. The slot owns the old session whole; the active slot
 	// is a fresh, idle session.
+	m.todoState = &tools.TodoState{}
 	newM, tick := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
 	if m.running {
 		t.Fatal("detach left m.running set")
+	}
+	if m.todoState != nil {
+		t.Fatal("the fresh session shows the departed session's todo plan")
 	}
 	if m.bg == nil {
 		t.Fatal("detach did not arm the background slot")
@@ -378,8 +426,13 @@ func TestBackground_DetachedFinishReplaysOnAttach(t *testing.T) {
 	if strings.Contains(transcriptText(m), "part two") {
 		t.Fatal("a detached delta rendered before attach")
 	}
-	if !strings.Contains(noticesText(m), "Background session") {
-		t.Fatal("the slot finish notice is missing")
+	// The finish notice is the slot's: invisible until attach, because the
+	// active session must not grow text for a run it knows nothing about.
+	if strings.Contains(noticesText(m), "Background session") {
+		t.Fatal("the slot finish notice leaked into the active transcript")
+	}
+	if !strings.Contains(slotNotices(m.bg), "Background session") {
+		t.Fatal("the slot finish notice did not land in the slot's transcript")
 	}
 
 	// Attach after the fact: faithful replay, input idle again.
@@ -747,8 +800,13 @@ func TestBackground_FinishMidActiveRunSparesActiveSlot(t *testing.T) {
 	if m.bg == nil || !m.bg.done {
 		t.Fatal("the background run was not finalized")
 	}
-	if !strings.Contains(noticesText(m), "Background session") {
-		t.Fatal("the background finish notice is missing")
+	// The close-out notice belongs to the slot's transcript; the active
+	// one stays clean.
+	if !strings.Contains(slotNotices(m.bg), "Background session") {
+		t.Fatal("the finish notice did not land in the slot's transcript")
+	}
+	if strings.Contains(noticesText(m), "Background session") {
+		t.Fatal("the finish notice leaked into the active transcript")
 	}
 	if m.approval != nil || m.question != nil {
 		t.Fatal("the background finish touched the active slot's dialogs")
@@ -836,7 +894,7 @@ func TestBackground_LateEventsAfterCancelDie(t *testing.T) {
 	if !m.bg.done {
 		t.Fatal("the cancel did not finalize the run")
 	}
-	noticesAfterCancel := noticesText(m)
+	noticesAfterCancel := slotNotices(m.bg)
 
 	// Late events from the dying loop: swallowed, not rendered, not
 	// finalized again.
@@ -845,9 +903,9 @@ func TestBackground_LateEventsAfterCancelDie(t *testing.T) {
 		t.Fatal("a late event from a canceled run rendered")
 	}
 	m.Update(slotEnvelope{ch: bgCh, ev: nil})
-	if n := strings.Count(noticesText(m), "Background session"); n != strings.Count(noticesAfterCancel, "Background session") {
-		t.Fatalf("late delivery re-finalized the run: notices grew from %d to %d",
-			strings.Count(noticesAfterCancel, "Background session"), strings.Count(noticesText(m), "Background session"))
+	if n := strings.Count(slotNotices(m.bg), "Background session"); n != strings.Count(noticesAfterCancel, "Background session") {
+		t.Fatalf("late delivery re-finalized the run: slot notices grew from %d to %d",
+			strings.Count(noticesAfterCancel, "Background session"), strings.Count(slotNotices(m.bg), "Background session"))
 	}
 	// Subagent events ride the session channel: never swallowed.
 	_, subCmd := m.Update(agentSubEventMsg{agentID: "a", kind: "text", content: "s"})
@@ -1196,8 +1254,8 @@ func TestBackground_RoutingFollowsTheEnvelopeChannel(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("finalization returned a command: re-arming a closed channel")
 	}
-	if n := strings.Count(noticesText(m), "Background session"); n != 1 {
-		t.Fatalf("finalization notices = %d, want exactly 1", n)
+	if n := strings.Count(slotNotices(m.bg), "Background session"); n != 1 {
+		t.Fatalf("finalization slot notices = %d, want exactly 1", n)
 	}
 	// The monitor's reader survives the run: it still reads AgentEventCh.
 	subCh <- AgentSubEvent{AgentID: "a", Kind: "text", Content: "after close"}
@@ -1272,15 +1330,220 @@ func TestBackground_TripleToggleFreesSlot(t *testing.T) {
 	if m.running {
 		t.Fatal("the slot's inbox restart leaked into the active slot's state")
 	}
-	if n := strings.Count(noticesText(m), "Background session"); n != 1 {
-		t.Fatalf("finalization notices = %d, want exactly 1", n)
+	if n := strings.Count(slotNotices(m.bg), "Background session"); n != 1 {
+		t.Fatalf("finalization slot notices = %d, want exactly 1", n)
 	}
 	m.bg.cancel()
 }
 
+// TestBackground_AttachRestoresOpenBlocks pins the accumulator restore: the
+// slot's transcript may end in an open assistant or thinking block, and the
+// buffered deltas replayed right after the swap must EXTEND it — the
+// accumulators the live handlers write through have to come back with the
+// transcript, or the first replayed delta overwrites the pre-detach part.
+// The replay window is before the attach notice, so the pin drives the
+// replay through bg.buf, the real path.
+func TestBackground_AttachRestoresOpenBlocks(t *testing.T) {
+	t.Run("thinking", func(t *testing.T) {
+		m := newTestModel(t)
+		m.bg = &backgroundRun{
+			started: time.Now(), done: true, sessionID: "sess-bg", title: "slot title",
+			messages: []message{
+				{role: "user", content: "q"},
+				{role: "thinking", content: "reasoning so far "},
+			},
+			buf: []agentMsg{agentThinkingMsg{text: "more"}},
+		}
+		m.todoState = &tools.TodoState{}
+		m.chatModel.AppendNotice("fork marker")
+
+		newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+		m = newM.(*model)
+		if m.todoState != nil {
+			t.Fatal("the displaced plan survived the attach")
+		}
+		if m.sessionTitle != "slot title" {
+			t.Fatalf("sessionTitle = %q, want the slot's title back", m.sessionTitle)
+		}
+		if m.chatModel.Thinking != "reasoning so far more" {
+			t.Fatalf("Thinking = %q, want the accumulator extended by the replay", m.chatModel.Thinking)
+		}
+		last := m.chatModel.Messages[len(m.chatModel.Messages)-2] // [-1] is the attach notice
+		if last.role != "thinking" || last.content != "reasoning so far more" {
+			t.Fatalf("thinking block = %q %q, want %q — the pre-detach part was lost", last.role, last.content, "reasoning so far more")
+		}
+	})
+
+	t.Run("text", func(t *testing.T) {
+		m := newTestModel(t)
+		m.bg = &backgroundRun{
+			started: time.Now(), done: true, sessionID: "sess-bg", title: "slot title",
+			messages: []message{
+				{role: "user", content: "q"},
+				{role: "assistant", content: "part one "},
+			},
+			buf: []agentMsg{agentTextMsg{text: "part two"}},
+		}
+		m.chatModel.AppendNotice("fork marker")
+
+		newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+		m = newM.(*model)
+		last := m.chatModel.Messages[len(m.chatModel.Messages)-2] // [-1] is the attach notice
+		want := "part one part two"
+		if last.role != "assistant" || last.content != want {
+			t.Fatalf("assistant block = %q %q, want %q — the pre-detach part was lost", last.role, last.content, want)
+		}
+	})
+}
+
+// TestBackground_RetryStateFollowsTheSession: Ctrl+R replays the prompt of
+// the session that actually failed. The retry trio (lastPrompt, mentions,
+// failed flag) moves into the slot on detach and back on attach — never
+// across sessions.
+func TestBackground_RetryStateFollowsTheSession(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	m := newBgTestModel(t, &heldLLM{name: "retry", release: release})
+
+	// The slot session has a failed prompt behind it.
+	m.running = true
+	m.agentCh = make(chan agentMsg, 8)
+	m.lastPrompt = "slot failed prompt"
+	m.lastMentions = []string{"notes.md"}
+	m.lastPromptFailed = true
+
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.lastPrompt != "" || m.lastPromptFailed {
+		t.Fatal("the fresh session inherited the slot's retry state")
+	}
+	if m.bg.lastPrompt != "slot failed prompt" || !m.bg.lastPromptFailed {
+		t.Fatal("the slot lost its own retry state on detach")
+	}
+
+	// The fresh session runs a prompt and fails it.
+	_, _, _ = m.handleInputSubmit(InputSubmitMsg{Text: "fresh question"})
+	m.Update(slotEnvelope{ch: m.agentCh, ev: agentDoneMsg{err: errors.New("boom")}})
+	if !m.lastPromptFailed || m.lastPrompt != "fresh question" {
+		t.Fatalf("fresh retry state = %q failed=%v, want the failed fresh prompt", m.lastPrompt, m.lastPromptFailed)
+	}
+
+	// Attach: the slot's retry state comes back, and Ctrl+R replays the
+	// SLOT's prompt — not the fresh session's. The slot's run finished
+	// while detached, so the attach is a plain swap.
+	m.bg.done = true
+	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.lastPrompt != "slot failed prompt" || !m.lastPromptFailed {
+		t.Fatalf("attach restored %q failed=%v, want the slot's failed prompt", m.lastPrompt, m.lastPromptFailed)
+	}
+	model2, _ := m.handleRetry()
+	m = model2.(*model)
+	found := false
+	for _, msg := range m.chatModel.Messages {
+		// submitPrompt wraps mentions into the wire form, so match the
+		// prompt's head, not the whole body.
+		if msg.role == "user" && strings.HasPrefix(msg.content, "slot failed prompt") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Ctrl+R did not replay the slot's failed prompt: transcript %q", transcriptText(m))
+	}
+	if !m.running {
+		t.Fatal("retry sanity: the replayed prompt should start a turn")
+	}
+	m.agentCancel() // the retried turn runs on the blocking LLM
+
+	// Detach again: the slot session leaves with its own retry state, and
+	// the new fresh session starts with NONE — Ctrl+R there must not
+	// replay another session's prompt. (MR1 has one slot: the displaced
+	// session's state is not kept in memory, its trio lives or dies with
+	// the slot fields.)
+	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.lastPrompt != "" || m.lastPromptFailed {
+		t.Fatalf("second detach left retry state %q failed=%v — a fresh session must not inherit one", m.lastPrompt, m.lastPromptFailed)
+	}
+	if m.bg == nil || m.bg.lastPrompt != "slot failed prompt" {
+		t.Fatal("the slot lost its retry state on the second detach")
+	}
+	if model3, _ := m.handleRetry(); model3.(*model).running {
+		t.Fatal("Ctrl+R replayed into a session with no failed prompt")
+	}
+	m.bg.cancel()
+}
+
+// TestBackground_AttachRefusesUnderPlan: symmetric with detach — plan
+// finalization writes global model state, so the swap is refused while a
+// plan worktree is pending.
+func TestBackground_AttachRefusesUnderPlan(t *testing.T) {
+	m := newTestModel(t)
+	m.mode = "plan"
+	m.planWorktree = &subagent.WorktreeManager{}
+	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
+
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.bg == nil {
+		t.Fatal("attach displaced the slot under a pending plan")
+	}
+	if !strings.Contains(m.flash, "Cannot attach while a plan session is active") {
+		t.Fatalf("flash = %q, want the plan refusal", m.flash)
+	}
+}
+
+// TestBackground_LateRequestForFinishedSlotIsDenied: a request tagged with a
+// finished slot's session dies denied/canceled — the tag is known, the
+// addressee is gone. It must not open a dialog, stash, or read as an
+// unknown-session factory bug.
+func TestBackground_LateRequestForFinishedSlotIsDenied(t *testing.T) {
+	m := newBgTestModel(t, &heldLLM{name: "late", release: make(chan struct{})})
+	m.bg = &backgroundRun{started: time.Now(), done: true, sessionID: "sess-bg"}
+	m.cfg.ApprovalCh = make(chan SessionApproval, 4)
+	m.cfg.QuestionCh = make(chan SessionQuestion, 4)
+
+	approvalReply := make(chan permission.ApprovalResult, 1)
+	m.Update(approvalRequestMsg{sa: SessionApproval{
+		Req:       permission.ApprovalRequest{Tool: "late-tool", Reply: approvalReply},
+		SessionID: "sess-bg",
+	}})
+	select {
+	case res := <-approvalReply:
+		if res.Allowed {
+			t.Fatal("the finished slot's approval was allowed")
+		}
+	default:
+		t.Fatal("the finished slot's approval was never answered")
+	}
+	if m.approval != nil {
+		t.Fatal("the finished slot's approval opened a dialog")
+	}
+	if m.bg.approval != nil {
+		t.Fatal("the finished slot's approval was stashed")
+	}
+
+	questionReply := make(chan tools.QuestionAnswer, 1)
+	m.Update(questionRequestMsg{sq: SessionQuestion{
+		Req:       tools.QuestionRequest{Question: "late?", Reply: questionReply},
+		SessionID: "sess-bg",
+	}})
+	select {
+	case res := <-questionReply:
+		if res.Selected != "canceled" {
+			t.Fatalf("the finished slot's question was answered %q, want canceled", res.Selected)
+		}
+	default:
+		t.Fatal("the finished slot's question was never answered")
+	}
+	if m.question != nil || m.bg.question != nil {
+		t.Fatal("the finished slot's question opened a dialog or stashed")
+	}
+}
+
 // TestBackground_UnknownTagQuestionIsDenied covers the question twin of the
-// untagged-denial rule: a question with a dead session's tag is canceled,
-// never routed.
+// untagged-denial rule: a question with no tag (a factory bug) or a dead
+// session's tag is canceled, never routed.
 func TestBackground_UnknownTagQuestionIsDenied(t *testing.T) {
 	m := newBgTestModel(t, &heldLLM{name: "q-deny", release: make(chan struct{})})
 	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
@@ -1305,5 +1568,22 @@ func TestBackground_UnknownTagQuestionIsDenied(t *testing.T) {
 	}
 	if m.bg.question != nil {
 		t.Fatal("the unknown-tagged question was stashed for the wrong slot")
+	}
+
+	// Untagged: the factory-bug case. Denied the same way, never guessed.
+	untagged := make(chan tools.QuestionAnswer, 1)
+	m.Update(questionRequestMsg{sq: SessionQuestion{
+		Req: tools.QuestionRequest{Question: "untagged?", Reply: untagged},
+	}})
+	select {
+	case res := <-untagged:
+		if res.Selected != "canceled" {
+			t.Fatalf("the untagged question was answered %q, want canceled", res.Selected)
+		}
+	default:
+		t.Fatal("the untagged question was never answered")
+	}
+	if m.question != nil || m.bg.question != nil {
+		t.Fatal("the untagged question opened a dialog or stashed")
 	}
 }

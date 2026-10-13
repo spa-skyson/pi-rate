@@ -715,14 +715,12 @@ func deferredInit(
 			MCPServers:     buildMCPServerConfigs(cfg),
 			// defaultAgent: reflect the agent's model in the TUI when it
 			// replaced the startup LLM, and hand over the switchable list.
-			LLM:           llm,
-			ModelName:     cmp.Or(agentModel, modelName),
-			ProviderName:  cmp.Or(agentProvider, providerName),
-			ActiveAgent:   activeAgent,
-			PrimaryAgents: primaryAgentsFor(ps.agentConfigs),
-			NewSessionAgent: func(ctx context.Context, llm adkmodel.LLM) (*agent.Agent, string, string, error) {
-				return newSessionAgent(ctx, llm)
-			},
+			LLM:             llm,
+			ModelName:       cmp.Or(agentModel, modelName),
+			ProviderName:    cmp.Or(agentProvider, providerName),
+			ActiveAgent:     activeAgent,
+			PrimaryAgents:   primaryAgentsFor(ps.agentConfigs),
+			NewSessionAgent: newSessionAgent,
 		},
 	}
 
