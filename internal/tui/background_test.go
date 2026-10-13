@@ -763,6 +763,69 @@ func TestBackground_EnvelopeAfterAttachRendersOrdinary(t *testing.T) {
 	}
 }
 
+// TestBackground_TripleToggleFreesAgent: detach → attach → detach wraps the
+// same channel in a new backgroundRun, while the reader parked by the first
+// detach still delivers the close. Classified by pointer that close would
+// land in the "foreground completion" branch — the second entry would stay
+// alive forever, wedging the queue, slash commands and agent cycling. The
+// channel comparison makes it the run's real done.
+func TestBackground_TripleToggleFreesAgent(t *testing.T) {
+	m := newTestModel(t)
+	m.agentCh = make(chan agentMsg, 8)
+	m.beginTurn()
+
+	// 1. Detach, and let one event arm an envelope reader for bg₁.
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	first := m.bg
+	_, cmd1 := m.Update(agentTextMsg{text: "delta"})
+	if cmd1 == nil {
+		t.Fatal("no re-arm after the detached event")
+	}
+
+	// 2. Attach: the run is foreground again, the envelope reader stays
+	// parked on the same channel.
+	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	if m.bg != nil || !m.running {
+		t.Fatal("the intermediate attach did not return the run to the foreground")
+	}
+
+	// 3. Detach again: a new backgroundRun over the SAME channel.
+	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	second := m.bg
+	if second == nil || second == first {
+		t.Fatal("expected a fresh backgroundRun over the same channel")
+	}
+	if second.ch != first.ch {
+		t.Fatal("the second detach did not capture the run's channel")
+	}
+	m.pendingPrompts = []queuedPrompt{{text: "queued behind it"}}
+
+	// The run finishes in silence: the close arrives through the FIRST
+	// detach's reader, in an envelope naming the first entry.
+	close(m.agentCh)
+	env, ok := cmd1().(bgEnvelope)
+	if !ok || env.ev != nil {
+		t.Fatalf("the close delivered %T, want an empty bgEnvelope", env)
+	}
+	m.Update(env)
+
+	if m.bg == nil || !m.bg.done {
+		t.Fatal("the close did not finalize the current background run — the agent would be held forever")
+	}
+	if !m.running {
+		t.Fatal("the queued prompt did not start after the freed agent")
+	}
+	if len(m.pendingPrompts) != 0 {
+		t.Fatalf("queue holds %d prompts after the start", len(m.pendingPrompts))
+	}
+	if n := strings.Count(noticesText(m), "Background run"); n != 1 {
+		t.Fatalf("finalization notices = %d, want exactly 1", n)
+	}
+}
+
 // TestBackground_StatusDoneShowsDropped: a finished run's evicted events are
 // gone for good — the done field carries the count.
 func TestBackground_StatusDoneShowsDropped(t *testing.T) {

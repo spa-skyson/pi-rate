@@ -301,30 +301,37 @@ func (m *model) handleBackgroundAgentMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 // names the run, which is the whole point: after a synthetic cancel the dead
 // run's parked reader keeps waking, and its late events must never be
 // mistaken for the next turn's — handleAgentDone run mid-turn would drop the
-// live turn's running flag.
+// live turn's running flag. Envelopes are classified by CHANNEL, not by
+// pointer: attach plus a second detach wraps the same channel in a new
+// backgroundRun, and the reader parked by the first detach still delivers —
+// matching the channel is what keeps that delivery a real done for the run
+// the model holds now.
 func (m *model) handleBgEnvelope(env bgEnvelope) (tea.Model, tea.Cmd) {
 	bg := env.bg
 	if bg.done {
 		// Finalized synthetically (cancel while detached): the loop is
 		// dying and dribbles into a channel nobody replays anymore. Swallow
-		// without re-arm — the parked reader exits at the close, the late
-		// events die in the channel buffer. No drain goroutine here: it
-		// would race the reader this command replaced.
+		// without re-arm — the parked reader exits at the close and the
+		// late events die in the channel buffer. A loop deaf to its context
+		// never reaches that close: its reader stays parked, one goroutine
+		// per cancel, bounded by the channel buffer — a debt
+		// cancelBackgroundRun accepts by finalizing synthetically. No drain
+		// goroutine here: it would race the reader this command replaced.
 		return m, nil
 	}
 	if env.ev == nil {
-		if m.bg == bg {
-			// The run's channel closed while still detached: the real done.
+		if m.bg != nil && m.bg.ch == bg.ch {
+			// The run's channel closed while detached: the real done.
 			return m.finishBackgroundRun(agentDoneMsg{})
 		}
-		// The channel closed after attach (m.bg moved on): an ordinary
-		// foreground completion.
+		// The channel closed with nothing detached over it: an ordinary
+		// foreground completion after attach.
 		return m.handleAgentDone(agentDoneMsg{})
 	}
-	if m.bg == bg {
+	if m.bg != nil && m.bg.ch == bg.ch {
 		// Still detached: buffer, and keep the envelope discipline.
-		bg.record(env.ev)
-		return m, waitForBgAgent(m.agentCh, bg)
+		m.bg.record(env.ev)
+		return m, waitForBgAgent(m.agentCh, m.bg)
 	}
 	// Detach/attach happened since this reader was armed: the run is
 	// foreground again. Ordinary handlers, ordinary re-arms — the envelope
