@@ -94,6 +94,8 @@ func TestCplxKeyRegistry_CoversCommandSet(t *testing.T) {
 		"/rtk", "/update", "/mcp", "/exit", "/quit",
 		// Formerly the extraSlashCommands special case; the registry owns it now.
 		"/todos",
+		// Background sessions (issue #74): a fresh session and the registry.
+		"/new", "/slots",
 	}
 	if len(registryByCommand) != len(want) {
 		t.Fatalf("registryByCommand has %d entries, want %d", len(registryByCommand), len(want))
@@ -120,7 +122,12 @@ func TestCplxKeyRegistry_CoversCommandSet(t *testing.T) {
 // its order is behavior and not merely presentation.
 func TestCplxSlashCommands_DerivedOrder(t *testing.T) {
 	want := []string{
-		"/help", "/clear", "/copy", "/model", "/agent", "/session", "/context", "/branch",
+		"/help", "/clear", "/copy", "/model", "/agent", "/session",
+		// Background sessions (issue #74): right after /session in the
+		// registry. "/s" still completes to /session — the first prefix
+		// match — and "/n" owns "/n" outright.
+		"/new", "/slots",
+		"/context", "/branch",
 		"/compact", "/subagents", "/history", "/login", "/commit", "/diff", "/plan", "/run",
 		// After /plan, so "/p" still completes to /plan and "/pr" is
 		// unambiguous: autocomplete returns the first prefix match.

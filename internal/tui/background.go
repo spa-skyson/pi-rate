@@ -140,6 +140,18 @@ func (m *model) addSlot(s *backgroundRun) {
 	m.slots = append(m.slots, s)
 }
 
+// removeSlot drops a slot from the registry. Used by dismissal only: attach
+// keeps the slot, re-parked with the displaced session.
+func (m *model) removeSlot(s *backgroundRun) bool {
+	for i, cur := range m.slots {
+		if cur == s {
+			m.slots = append(m.slots[:i], m.slots[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // slotByChannel finds the slot whose run channel the envelope names. The
 // whole routing rests on this: a channel belongs to exactly one run — the
 // active one is never in the registry, a registry slot's is never m.agentCh
@@ -215,12 +227,11 @@ func (m *model) toggleBackground() (tea.Model, tea.Cmd) {
 		return m.detachRun()
 	case len(m.slots) == 0:
 		return m, m.setFlash("Nothing to background")
-	case len(m.slots) > 0:
-		// Interim registry state: attach the oldest slot; the /slots popup
-		// over several slots arrives with the popup commit.
+	case len(m.slots) == 1:
 		return m.attachBackground(m.slots[0])
 	default:
-		return m, m.setFlash("Nothing to background")
+		m.newSlotsPopup()
+		return m, nil
 	}
 }
 
@@ -472,6 +483,7 @@ func (m *model) attachBackground(bg *backgroundRun) (tea.Model, tea.Cmd) {
 			m.face.SetMood(MoodIdle)
 		}
 	}
+	m.popOverlay(overlaySessions)
 	m.chatModel.AppendNotice(fmt.Sprintf(
 		"Attached — background session returned. The previous session (%s) is parked in the registry: Ctrl+B or /slots.",
 		shortSessionID(displaced)))
@@ -724,6 +736,22 @@ type BackgroundStatus struct {
 // Idle reports whether the slot has nothing running and nothing to review:
 // a parked session waiting only for its attach.
 func (s *BackgroundStatus) Idle() bool { return s.Parked || (s.Done && s.Events == 0) }
+
+// backgroundStatus snapshots one slot for the popup rows.
+func backgroundStatus(bg *backgroundRun) *BackgroundStatus {
+	elapsed := time.Since(bg.started)
+	if bg.done {
+		elapsed = bg.finished.Sub(bg.started)
+	}
+	return &BackgroundStatus{
+		Elapsed: elapsed,
+		Events:  bg.seen,
+		Dropped: bg.dropped,
+		Done:    bg.done,
+		Parked:  bg.parked,
+		Await:   bg.approval != nil || bg.question != nil,
+	}
+}
 
 // BackgroundSummary aggregates the slot registry for the status bar: the
 // count answers "how much runs in the background", Awaiting is the ⚑ badge

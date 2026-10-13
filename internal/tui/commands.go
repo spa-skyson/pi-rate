@@ -61,6 +61,42 @@ func (m *model) handleSlashCommand(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// hasConversationContent reports whether the transcript carries anything a
+// user would miss — prompts, replies, errors, reasoning — as opposed to the
+// chrome notices a fresh fork already shows.
+func hasConversationContent(messages []message) bool {
+	for _, msg := range messages {
+		if msg.isNotice || msg.isMeta || msg.isWarning {
+			continue
+		}
+		if msg.role == "user" || msg.content != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// handleNewCommand starts a fresh active session without a run. The current
+// one is not discarded: an idle session with content parks in the registry —
+// the same ownership move detach performs, minus the loop. Busy refuses (a
+// running turn holds its session), an already-empty session says so.
+func (m *model) handleNewCommand() (tea.Model, tea.Cmd) {
+	if m.running {
+		return m, m.setFlash("The active session is running — /new when it finishes")
+	}
+	if m.mode == "plan" && m.planWorktree != nil {
+		return m, m.setFlash("Cannot start a new session while a plan is pending")
+	}
+	if !hasConversationContent(m.chatModel.Messages) {
+		return m, m.setFlash("This session is already empty")
+	}
+	model, cmd, ok := m.parkActiveSession(true)
+	if !ok {
+		return model, nil
+	}
+	return model, cmd
+}
+
 // showSessionMessage appends the current session ID as an assistant message.
 func (m *model) showSessionMessage() {
 	m.chatModel.Messages = append(m.chatModel.Messages, message{

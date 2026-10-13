@@ -82,6 +82,8 @@ var keyRegistry = []keyBinding{
 	{ID: "cmd.model", Key: "/model", Description: "Show or switch model", Category: catSession, Kind: kindSlash},
 	{ID: "cmd.agent", Key: "/agent", Description: "Show or switch the session agent", Category: catSession, Kind: kindSlash},
 	{ID: "cmd.session", Key: "/session", Description: "Show session info", Category: catSession, Kind: kindSlash},
+	{ID: "cmd.new", Key: "/new", Description: "Start a fresh session (the current one moves to the background registry)", Category: catSession, Kind: kindSlash},
+	{ID: "cmd.slots", Key: "/slots", Description: "Show background sessions (attach, dismiss)", Category: catSession, Kind: kindSlash},
 	{ID: "cmd.context", Key: "/context", Description: "Show context usage", Category: catSession, Kind: kindSlash},
 	{ID: "cmd.branch", Key: "/branch", Description: "Manage branches", Category: catGit, Kind: kindSlash},
 	{ID: "cmd.compact", Key: "/compact", Description: "Compact context", Category: catSession, Kind: kindSlash},
@@ -129,6 +131,8 @@ var keyRegistry = []keyBinding{
 	{ID: "key.chat-down", Key: "pgdn", Description: "Scroll the chat down by a page", Category: catKeys, Kind: kindHotkey},
 	// Popup-local: only answers inside the subagent monitor.
 	{ID: "key.subagents-steer", Key: "s", Description: "Steer the selected running subagent (in the monitor)", Category: catKeys, Kind: kindHotkey},
+	// Popup-local: only answers inside the background-sessions registry.
+	{ID: "key.slots-dismiss", Key: "d", Description: "Dismiss the selected background session (in the registry)", Category: catKeys, Kind: kindHotkey},
 }
 
 // registryByCommand indexes the slash rows by command for dispatch and
@@ -243,7 +247,14 @@ func bindSlashHandlers() {
 			m.handleAgentsCommand()
 			return m, nil
 		},
-		"cmd.session":             slashCmdVoid((*model).showSessionMessage),
+		"cmd.session": slashCmdVoid((*model).showSessionMessage),
+		"cmd.new":     slashCmdBare((*model).handleNewCommand),
+		"cmd.slots": func(m *model, _ []string) (tea.Model, tea.Cmd) {
+			// Takes no arguments: trailing whitespace or stray text is
+			// ignored, the popup opens.
+			m.newSlotsPopup()
+			return m, nil
+		},
 		"cmd.context":             slashCmdVoid((*model).showContextMessage),
 		"cmd.branch":              slashCmdArgs((*model).handleBranchCommand),
 		"cmd.compact":             slashCmdVoid((*model).handleCompactCommand),

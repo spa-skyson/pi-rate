@@ -713,22 +713,25 @@ func TestBackground_BackgroundSessionWritesEventsAfterDetach(t *testing.T) {
 
 // TestBackground_AttachRefusesWhileActiveRuns: the swap needs an idle active
 // session — attaching over a running turn would clobber it mid-flight.
-// Ctrl+B itself detaches, so the refusal is reached through attachBackground
-// directly here; the popup path carries the same guard and is pinned with
-// the popup.
+// Ctrl+B itself now detaches, so the attach path is the registry popup: Enter
+// on a busy active session refuses by the guard and keeps the popup open.
 func TestBackground_AttachRefusesWhileActiveRuns(t *testing.T) {
 	m := newTestModel(t)
 	m.running = true
 	activeSID := m.cfg.SessionID
 	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "sess-bg"})
 
-	mdl, _ := m.attachBackground(m.slots[0])
-	m = mdl.(*model)
+	m.newSlotsPopup()
+	model2, _, _ := m.handleSlotsPopupKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}).Key())
+	m = model2.(*model)
+	if m.cfg.SessionID == "sess-bg" {
+		t.Fatal("attach over a running turn swapped the session")
+	}
 	if m.cfg.SessionID != activeSID {
 		t.Fatal("the refused attach changed the active session")
 	}
-	if len(m.slots) != 1 || m.slots[0].sessionID != "sess-bg" {
-		t.Fatal("the refused attach displaced the slot")
+	if m.slotsPopup == nil {
+		t.Fatal("the refused attach closed the registry popup")
 	}
 	if !strings.Contains(m.flash, "active session is running") {
 		t.Fatalf("flash = %q, want the busy-active refusal", m.flash)

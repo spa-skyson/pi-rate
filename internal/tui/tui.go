@@ -92,6 +92,9 @@ type model struct {
 	// See background.go.
 	slots []*backgroundRun
 
+	// slotsPopup is the open session-registry popup (design §5), or nil.
+	slotsPopup *slotsPopupState
+
 	// turnStarted is when the current turn began (set by beginTurn next to
 	// running). The done-attention signal in handleAgentDone measures the
 	// turn against attentionDoneAfter from it.
@@ -2408,6 +2411,12 @@ func (m *model) View() tea.View {
 	if m.branchPopup != nil {
 		popupView := m.renderBranchPopup()
 		b.WriteString(popupView)
+		b.WriteString("\n")
+	}
+
+	// Render the background-session registry popup (design §5).
+	if m.slotsPopup != nil {
+		b.WriteString(m.renderSessionsPopup())
 		b.WriteString("\n")
 	}
 

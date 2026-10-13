@@ -80,6 +80,7 @@ func TestKeyRegistry_CoversHotkeys(t *testing.T) {
 		"pgup":      "key.chat-up",
 		"pgdn":      "key.chat-down",
 		"s":         "key.subagents-steer",
+		"d":         "key.slots-dismiss",
 	}
 	byID := make(map[string]keyBinding, len(keyRegistry))
 	for _, b := range keyRegistry {
