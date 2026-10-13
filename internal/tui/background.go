@@ -410,6 +410,7 @@ func (m *model) attachBackground(bg *backgroundRun) (tea.Model, tea.Cmd) {
 	bg.done = true   // the displaced session is idle: nothing runs in it
 	bg.parked = true // ...and it left the screen: "idle", not "✓"
 	bg.finished = now
+	bg.seen, bg.dropped = 0, 0 // the buffered count belonged to the run that went active; the row must not show a stranger's events
 	if bg.started.IsZero() {
 		bg.started = now
 	}
@@ -676,6 +677,7 @@ func (m *model) cancelBackgroundSlot(bg *backgroundRun) tea.Cmd {
 
 // cancelAllBackgroundSlots stops every live slot — the Ctrl+C quit path:
 // nothing survives into quit with a loop still writing.
+// cancelAllBackgroundSlots stops every live slot — the Ctrl+C quit path.
 func (m *model) cancelAllBackgroundSlots() tea.Cmd {
 	var cmds []tea.Cmd
 	for _, s := range m.liveSlots() {

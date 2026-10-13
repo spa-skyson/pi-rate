@@ -83,17 +83,28 @@ func (m *model) selectedSlot() *backgroundRun {
 }
 
 // clampSelection pulls the selection back into the registry after a slot
-// left it — the popup never shows an empty selection while rows remain.
+// left it, and pulls the scroll window with it: a dismiss under a scrolled
+// popup would otherwise leave scrollOff past the last row — a slice-bounds
+// panic in the next render — or park the highlight on a row the selection
+// no longer names. The popup never shows an empty selection while rows
+// remain.
 func (m *model) clampSelection() {
-	if m.slotsPopup == nil {
+	p := m.slotsPopup
+	if p == nil {
 		return
 	}
 	if len(m.slots) == 0 {
 		m.popOverlay(overlaySessions)
 		return
 	}
-	if m.slotsPopup.selected >= len(m.slots) {
-		m.slotsPopup.selected = len(m.slots) - 1
+	if p.selected >= len(m.slots) {
+		p.selected = len(m.slots) - 1
+	}
+	if maxOff := len(m.slots) - p.height; p.scrollOff > maxOff {
+		if maxOff < 0 {
+			maxOff = 0
+		}
+		p.scrollOff = maxOff
 	}
 }
 
@@ -114,8 +125,11 @@ func (m *model) handleSlotsPopupKey(key tea.Key) (tea.Model, tea.Cmd, bool) {
 		m.moveSlotsSelectionDown()
 	default:
 		if hotkeyIDFor(key) == "key.slots-dismiss" {
-			m.dismissSelectedSlot()
-			return m, nil, true
+			// The dismissal of a live slot returns the parked reader of
+			// whatever run it left behind — dropping it would strand the
+			// loop without its one reader.
+			cmd := m.dismissSelectedSlot()
+			return m, cmd, true
 		}
 		m.popOverlay(overlaySessions)
 	}
@@ -135,20 +149,25 @@ func (m *model) attachSelectedSlot() (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
-// dismissSelectedSlot removes the highlighted slot. A live one is canceled
-// first — dismissal turns into the same synthetic finalize Esc-Esc performs,
-// and a second d removes the finished slot; a finished or parked one leaves
-// the registry at once, its transcript staying on disk in events.jsonl.
-func (m *model) dismissSelectedSlot() {
+// dismissSelectedSlot removes the highlighted slot, draining it first. A
+// live one is canceled — with its inbox emptied BEFORE the cancel, or
+// finishSlotRun would resurrect the next queued prompt and turn every d
+// into "kill this run, start the next one". The canceled run leaves no
+// restart behind (the inbox is gone with it), so the returned command is
+// the close-out batch — the attention signal when one is configured, nil
+// when the dismissal is silent. A finished or parked slot leaves the
+// registry at once, its transcript staying on disk in events.jsonl.
+func (m *model) dismissSelectedSlot() tea.Cmd {
 	s := m.selectedSlot()
 	if s == nil {
-		return
+		return nil
 	}
 	if !s.done {
 		// A writing loop is canceled, not dropped: its stash dies denied,
-		// the row flips to ✓, and the next d removes it.
-		m.cancelBackgroundSlot(s)
-		return
+		// the row flips to ✓, and the next d removes it. The inbox goes
+		// first — dismissal drains the session, it does not continue it.
+		s.inbox = nil
+		return m.cancelBackgroundSlot(s)
 	}
 	// Fail-closed hygiene: a finished slot's stash should already be nil
 	// (finishSlotRun denies it), but a slot leaves the registry with no
@@ -166,6 +185,7 @@ func (m *model) dismissSelectedSlot() {
 	m.chatModel.AppendNotice(fmt.Sprintf(
 		"Background session %s dismissed — its transcript stays on disk: /resume %s.",
 		shortSessionID(s.sessionID), s.sessionID))
+	return nil
 }
 
 // slotRow renders one registry row the popup and tests share: the state
@@ -231,6 +251,11 @@ func (m *model) renderSessionsPopup() string {
 	height := popup.height
 	scrollOff := popup.scrollOff
 	if len(rows) > height {
+		// Defense in depth over clampSelection: the render must survive
+		// whatever the state says, never panic on a stale window.
+		if scrollOff > len(rows)-height {
+			scrollOff = len(rows) - height
+		}
 		rows = rows[scrollOff : scrollOff+height]
 	}
 

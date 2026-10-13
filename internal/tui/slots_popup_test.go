@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/permission"
 )
 
@@ -394,4 +396,118 @@ func TestBackground_StatusBadgesUpdateOnEvents(t *testing.T) {
 	if sum := m.backgroundSummary(); sum.Live != 0 || sum.Slots != 2 || sum.Awaiting != 0 {
 		t.Fatalf("summary after the finish = %+v, want 2 slots / 0 live / 0 waiting", sum)
 	}
+}
+
+// TestSlotsPopup_DismissClampsScrollWindow: with more slots than the popup
+// shows, dismissing the bottom row must not push the scroll window past the
+// registry (a slice-bounds panic in the next render) and must not leave the
+// highlight on a row the selection no longer names — Enter still attaches
+// exactly the highlighted row.
+func TestSlotsPopup_DismissClampsScrollWindow(t *testing.T) {
+	m := newTestModel(t)
+	for i := 0; i < 10; i++ {
+		m.addSlot(&backgroundRun{started: time.Now(), done: true, sessionID: fmt.Sprintf("sess-%02d", i)})
+	}
+	m.newSlotsPopup()
+	if m.slotsPopup.height != 8 {
+		t.Fatalf("popup height = %d, want the 8-row cap", m.slotsPopup.height)
+	}
+
+	// Scroll to the bottom: selection 9, window at offset 2.
+	for i := 0; i < 9; i++ {
+		m.moveSlotsSelectionDown()
+	}
+	if m.slotsPopup.selected != 9 || m.slotsPopup.scrollOff != 2 {
+		t.Fatalf("setup: selected=%d scrollOff=%d, want 9/2", m.slotsPopup.selected, m.slotsPopup.scrollOff)
+	}
+	bottom := m.selectedSlot().sessionID
+	if bottom != "sess-09" {
+		t.Fatalf("bottom selection = %s, want sess-09", bottom)
+	}
+
+	// Dismiss the bottom slot: the registry shrinks to 9, the window and
+	// the selection clamp, the render neither panics nor highlights a
+	// stranger.
+	m.dismissSelectedSlot()
+	if len(m.slots) != 9 {
+		t.Fatalf("registry holds %d slots, want 9", len(m.slots))
+	}
+	if m.slotsPopup.selected != 8 || m.slotsPopup.scrollOff != 1 {
+		t.Fatalf("after dismiss: selected=%d scrollOff=%d, want 8/1", m.slotsPopup.selected, m.slotsPopup.scrollOff)
+	}
+	highlighted := m.slots[m.slotsPopup.selected]
+	wantID := highlighted.sessionID // captured: attach swaps the slot's sessionID with the displaced one
+	view := m.renderSessionsPopup()
+	if !strings.Contains(view, "> "+shortSessionID(wantID)) {
+		t.Fatalf("the highlight does not sit on the selected row:\n%s", view)
+	}
+
+	// Enter attaches exactly the highlighted row.
+	mdl, _ := m.attachSelectedSlot()
+	m = mdl.(*model)
+	if m.cfg.SessionID != wantID {
+		t.Fatalf("Enter attached %s, want the highlighted %s", m.cfg.SessionID, wantID)
+	}
+
+	// Dismissing down to an empty registry pulls scrollOff to zero and
+	// closes the popup. The attach above closed it too (attachBackground
+	// pops the popup on success), so every iteration reopens it first.
+	for len(m.slots) > 0 {
+		if m.slotsPopup == nil {
+			m.newSlotsPopup()
+		}
+		m.dismissSelectedSlot()
+	}
+	if m.slotsPopup != nil {
+		t.Fatal("an emptied registry left the popup open")
+	}
+}
+
+// TestSlotsPopup_DismissDrainsInbox: dismissing a live slot empties its
+// inbox BEFORE the cancel — the dismissal ends the session, it does not
+// resurrect the next queued prompt — and the returned command is the parked
+// reader of the slot's channel, never dropped.
+func TestSlotsPopup_DismissDrainsInbox(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	m := newBgTestModel(t, &heldLLM{name: "dismiss", release: release})
+	// Attention on: the cancel path's close-out carries a real command, so
+	// the test can pin that the d key PROPAGATES it instead of dropping it.
+	m.cfg.Attention = &config.AttentionConfig{}
+	m.beginTurn()
+	reader := m.startAgentLoop("long task")
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	slot := m.slots[0]
+	slot.inbox = []queuedPrompt{{text: "next"}, {text: "after next"}}
+
+	m.newSlotsPopup()
+	// d on the live slot: canceled, inbox drained — no resurrection. The
+	// key handler returns the dismissal's command (the close-out batch);
+	// dropping it here is how a parked reader gets lost.
+	d := tea.KeyPressMsg(tea.Key{Code: 'd'}).Key()
+	mdl, cmd, handled := m.handleSlotsPopupKey(d)
+	m = mdl.(*model)
+	if !handled {
+		t.Fatal("the popup did not claim the d key")
+	}
+	if !slot.done {
+		t.Fatal("the dismissal did not finalize the live slot")
+	}
+	if len(slot.inbox) != 0 {
+		t.Fatalf("the dismissal left %d inbox prompts — the session was continued, not drained", len(slot.inbox))
+	}
+	if cmd == nil {
+		t.Fatal("the d key dropped the dismissal's command")
+	}
+	_ = reader
+
+	// The second d removes the finished slot.
+	m.dismissSelectedSlot()
+	if len(m.slots) != 0 {
+		t.Fatalf("registry holds %d slots after the second d, want 0", len(m.slots))
+	}
+	// The drained slot never restarted, so there is no cancel func to call
+	// (finishSlotRun nils it; startSlotInbox found an empty inbox) — and no
+	// loop left writing behind the test.
 }
