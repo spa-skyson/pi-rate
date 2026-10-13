@@ -115,7 +115,8 @@ var keyRegistry = []keyBinding{
 	// --- hotkeys (the chord dispatchers resolve through hotkeyFor) ---
 	{ID: "key.retry", Key: "ctrl+r", Description: "Re-send the prompt of a turn that failed", Category: catKeys, Kind: kindHotkey},
 	{ID: "key.compact-tools", Key: "ctrl+o", Description: "Toggle compact tool output", Category: catKeys, Kind: kindHotkey},
-	{ID: "key.branch", Key: "ctrl+b", Description: "Toggle the branch popup", Category: catKeys, Kind: kindHotkey},
+	{ID: "key.background", Key: "ctrl+b", Description: "Send the running task to background / attach it back", Category: catKeys, Kind: kindHotkey},
+	{ID: "key.branch", Key: "ctrl+g", Description: "Toggle the branch popup", Category: catKeys, Kind: kindHotkey},
 	{ID: "key.agent-cycle", Key: "shift+tab", Description: "Cycle the session agent", Category: catKeys, Kind: kindHotkey},
 	{ID: "key.history", Key: "ctrl+h", Description: "Open history search", Category: catKeys, Kind: kindHotkey},
 	{ID: "key.monitor", Key: "ctrl+t", Description: "Toggle the subagent monitor", Category: catKeys, Kind: kindHotkey},

@@ -707,17 +707,27 @@ func TestHandleKey_RawCtrlAERunes(t *testing.T) {
 	}
 }
 
-func TestHandleKey_CtrlBInTextMovesBackward(t *testing.T) {
+func TestHandleKey_CtrlBInBackgroundsEvenWithText(t *testing.T) {
+	// Ctrl+B used to be the readline backward-char chord and then the
+	// branch popup; it is the background hotkey now, and deliberately
+	// ungated on the prompt text: the action is non-destructive and its own
+	// undo (press again). Idle it explains itself and leaves the text alone.
 	m := newTestModel(t)
 	m.statusModel.GitBranch = "main"
 	m.inputModel.Text = "abc"
 	m.inputModel.CursorPos = 3
 	m.handleKey(makeKeyMod('b', tea.ModCtrl))
 	if m.branchPopup != nil {
-		t.Fatal("expected Ctrl+B in non-empty input to stay in text input")
+		t.Fatal("expected Ctrl+B not to open the branch popup (that is Ctrl+G now)")
 	}
-	if m.inputModel.CursorPos != 2 {
-		t.Errorf("expected cursorPos 2 after Ctrl+B, got %d", m.inputModel.CursorPos)
+	if m.bg != nil || m.running {
+		t.Fatal("expected an idle Ctrl+B to change no run state")
+	}
+	if m.flash != "Nothing to background" {
+		t.Fatalf("expected the idle flash, got %q", m.flash)
+	}
+	if m.inputModel.Text != "abc" || m.inputModel.CursorPos != 3 {
+		t.Fatalf("expected the prompt untouched, got %q cursor %d", m.inputModel.Text, m.inputModel.CursorPos)
 	}
 }
 

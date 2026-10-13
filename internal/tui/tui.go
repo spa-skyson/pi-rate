@@ -83,6 +83,12 @@ type model struct {
 	agentCancel    context.CancelFunc // cancels the active agent response without quitting the TUI
 	pendingPrompts []queuedPrompt     // prompts submitted while a response is active
 
+	// bg is the detached run (Ctrl+B): non-nil from detach until attach.
+	// While it is alive it holds the one live main loop — new prompts queue,
+	// agent and model switches refuse — and its events buffer instead of
+	// rendering. See background.go.
+	bg *backgroundRun
+
 	// turnStarted is when the current turn began (set by beginTurn next to
 	// running). The done-attention signal in handleAgentDone measures the
 	// turn against attentionDoneAfter from it.
@@ -1115,7 +1121,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// without consuming one: the readers then accumulate for the whole turn, and
 	// on close(agentCh) every one of them delivers its own agentDoneMsg, running
 	// handleAgentDone — lifecycle hooks, startNextPrompt — once per surplus
-	// reader. See TestAgentListenerStaysSingle.
+	// reader. See TestUnclaimedMessageDoesNotArmAgentListener and
+	// TestWindowSizeDoesNotArmAgentListener.
 	return m, nil
 }
 
@@ -1201,25 +1208,44 @@ func (m *model) handleKeyPressMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool
 }
 
 // handleInputSubmit runs a submitted line: a slash command directly, anything
-// else queued as a prompt. Slash commands are ignored while a turn is running.
+// else queued as a prompt. Slash commands are ignored while a turn is running
+// or a backgrounded run holds the agent.
 //
 // A prompt submitted mid-turn is queued without canceling the running turn
 // (opencode semantics: typing is never lost and the running turn completes
 // before the queued prompt starts). Esc or Ctrl+C still cancels explicitly.
+// Detached, the same queue takes the prompt — the backgrounded run holds the
+// agent, so nothing may start (the one-live-loop invariant) — with a flash
+// that says why the prompt is waiting.
 func (m *model) handleInputSubmit(msg InputSubmitMsg) (tea.Model, tea.Cmd, bool) {
 	if strings.HasPrefix(msg.Text, "/") {
-		if m.running {
+		if m.running || m.bgAlive() {
+			// The loop reads the session the command would rewrite
+			// (/compact, /branch, /clear): a backgrounded run holds it, the
+			// same reason queued prompts wait. The running case stays
+			// silent as it always was — there, the running status explains
+			// itself; detached, the free input makes silence read as a
+			// swallowed keystroke, so name the reason.
+			if m.bgAlive() {
+				m.chatModel.AppendNotice("Slash commands are unavailable while a run is in the background — Ctrl+B to attach.")
+			}
 			return m, nil, true
 		}
 		model, cmd := m.handleSlashCommand(msg.Text)
 		return model, cmd, true
 	}
-	if m.running {
+	if m.running || m.bgAlive() {
 		_, cmd := m.enqueuePrompt(msg.Text, msg.Mentions)
-		// Flash "Queued" so Enter is not silent. enqueuePrompt sets flash
+		// Flash so Enter is not silent. enqueuePrompt sets flash
 		// to "Prompt queue full" when the queue is maxed; keep that.
 		if m.flash != "Prompt queue full" {
-			flashCmd := m.setFlash("Queued")
+			label := "Queued"
+			if m.bgAlive() {
+				// The input is free while a run is backgrounded, so a plain
+				// "Queued" would read as a stall: name the reason it waits.
+				label = "Queued — background run active"
+			}
+			flashCmd := m.setFlash(label)
 			if cmd != nil {
 				cmd = tea.Batch(cmd, flashCmd)
 			} else {
@@ -1312,6 +1338,22 @@ func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // updateAgentStream handles the events streamed by a running agent turn.
 func (m *model) updateAgentStream(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
+	// An event read from a backgrounded run's channel: the envelope names
+	// the run, so a run canceled while detached cannot have its late events
+	// mistaken for the next turn's (background.go).
+	if env, ok := msg.(bgEnvelope); ok {
+		model, cmd := m.handleBgEnvelope(env)
+		return model, cmd, true
+	}
+	// A detached run's events buffer instead of rendering. Routing, not a
+	// second reader: the parked command delivered this message and the
+	// handler below re-arms by the message's source (background.go).
+	if m.bgAlive() {
+		if _, ok := msg.(agentMsg); ok {
+			model, cmd := m.handleBackgroundAgentMsg(msg)
+			return model, cmd, true
+		}
+	}
 	switch msg := msg.(type) {
 	case agentThinkingMsg:
 		model, cmd := m.handleAgentThinking(msg)
@@ -1410,11 +1452,27 @@ func (m *model) updateSession(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		model, cmd := m.handleModelCandidates(msg)
 		return model, cmd, true
 	case approvalRequestMsg:
+		// Detached, the dialog does not open: the request waits in the bg
+		// stash behind a notice, and attach opens it (background.go).
+		if m.bgAlive() {
+			model, cmd := m.handleBackgroundApproval(msg)
+			return model, cmd, true
+		}
 		model, cmd := m.handleApprovalRequest(msg)
 		return model, cmd, true
 	case questionRequestMsg:
+		if m.bgAlive() {
+			model, cmd := m.handleBackgroundQuestion(msg)
+			return model, cmd, true
+		}
 		model, cmd := m.handleQuestionRequest(msg)
 		return model, cmd, true
+	case backgroundTickMsg:
+		// Repaints the detached run's elapsed-time field; dies with the run.
+		if m.bgAlive() {
+			return m, armBackgroundTick(), true
+		}
+		return m, nil, true
 	}
 	return nil, nil, false
 }
@@ -1775,11 +1833,28 @@ func (m *model) handleInterruptKey(key tea.Key) (tea.Model, tea.Cmd, bool) {
 			m.chatModel.AppendWarning("\nEsc again to cancel...")
 			return m, resetEscCancelCount(m), true
 		}
+		if m.bgAlive() {
+			// The backgrounded run deserves the same double-Esc contract:
+			// the input is free, so a bare Esc must stay a no-op, but a
+			// deliberate Esc-Esc reaches the run the input no longer holds.
+			m.escCancelCount++
+			if m.escCancelCount >= 2 {
+				m.escCancelCount = 0
+				return m, m.cancelBackgroundRun(), true
+			}
+			m.chatModel.AppendWarning("\nEsc again to cancel the background run...")
+			return m, resetEscCancelCount(m), true
+		}
 		return m, nil, true
 
 	case "key.quit":
-		if m.running {
-			cmd := m.cancelAgent()
+		if m.running || m.bgAlive() {
+			var cmd tea.Cmd
+			if m.bgAlive() {
+				cmd = m.cancelBackgroundRun()
+			} else {
+				cmd = m.cancelAgent()
+			}
 			m.ctrlCCount++
 			m.chatModel.AppendWarning("\nCtrl+C again to quit...")
 			return m, tea.Batch(cmd, resetCtrlCCount(m)), true
@@ -1829,10 +1904,19 @@ func (m *model) handleToggleKey(key tea.Key) (tea.Model, tea.Cmd, bool) {
 		m.chatModel.ToolDisplay.CompactTools = !m.chatModel.ToolDisplay.CompactTools
 		return m, nil, true
 
+	case "key.background":
+		// Ctrl+B sends the running turn to the background or attaches a
+		// backgrounded one back. Deliberately ungated on the prompt text,
+		// unlike the editing chords: the action is non-destructive and its
+		// own undo (press again), and while busy is exactly when it is needed.
+		model, cmd := m.toggleBackground()
+		return model, cmd, true
+
 	case "key.branch":
-		// Ctrl+B toggles the branch popup only when the prompt is empty. The
-		// standard text input uses Ctrl+B as backward cursor movement, and some
-		// terminals emit it for left/back navigation.
+		// Ctrl+G toggles the branch popup only when the prompt is empty.
+		// Formerly Ctrl+B — that chord now backgrounds the running task —
+		// and still gated because the standard text input uses Ctrl+G as a
+		// goto-line/readline chord, and some terminals emit it for navigation.
 		if m.inputModel.Text == "" {
 			if m.statusModel.GitBranch != "" {
 				if m.branchPopup == nil {
@@ -2976,6 +3060,7 @@ func (m *model) statusRenderInput() StatusRenderInput {
 		Flash:         m.flash,
 		Palette:       m.palette,
 		RunningAgents: m.runningSubagentCount(),
+		Background:    m.backgroundStatus(),
 	}
 }
 

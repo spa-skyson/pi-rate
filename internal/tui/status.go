@@ -47,6 +47,9 @@ type StatusRenderInput struct {
 	// RunningAgents is the number of live subagents, for the ⚓ counter. Zero
 	// renders nothing.
 	RunningAgents int
+	// Background is the detached run's status, nil when nothing is
+	// backgrounded.
+	Background *BackgroundStatus
 }
 
 // runCycleInfo carries /run state for the status bar.
@@ -115,6 +118,7 @@ func (s *StatusModel) Render(in StatusRenderInput) string {
 	parts = append(parts, statusLocationField(in, dim, p)...)
 	parts = append(parts, s.statusToolField(p)...)
 	parts = append(parts, statusSubagentsField(in, p)...)
+	parts = append(parts, statusBackgroundField(in, p)...)
 	parts = append(parts, statusRunCycleField(in, p)...)
 
 	return bar.Render(strings.Join(parts, sep))
@@ -268,6 +272,29 @@ func statusSubagentsField(in StatusRenderInput, p Palette) []string {
 	return []string{anchorStyle.Render(fmt.Sprintf("⚓ %d", in.RunningAgents))}
 }
 
+// statusBackgroundField renders the detached run's counter: "bg 2m 13s · 34 ev"
+// while it works, "bg ✓ 34 ev" once it finished unattached (the "✓" is the
+// same shape statusLoadingField ticks with) — with ", N dropped" appended
+// when the replay buffer evicted events, because a finished run's skipped
+// events are gone for good and the count is the only trace. It sits next to
+// the ⚓ counter — both answer "what is working right now" — and is silent
+// when nothing is backgrounded, so an attached run leaves no ghost field.
+func statusBackgroundField(in StatusRenderInput, p Palette) []string {
+	if in.Background == nil {
+		return nil
+	}
+	bgStyle := lipgloss.NewStyle().Foreground(p.Mauve)
+	if in.Background.Done {
+		text := fmt.Sprintf("bg ✓ %d ev", in.Background.Events)
+		if in.Background.Dropped > 0 {
+			text += fmt.Sprintf(", %d dropped", in.Background.Dropped)
+		}
+		return []string{bgStyle.Render(text)}
+	}
+	return []string{bgStyle.Render(fmt.Sprintf("bg %s · %d ev",
+		formatTurnDuration(in.Background.Elapsed), in.Background.Events))}
+}
+
 // statusRunCycleField renders the /run cycle indicator. The spec name is
 // omitted: it is long enough to wrap the status bar onto a second line, and it
 // is already shown in the sidebar.
@@ -311,6 +338,11 @@ func (m *model) bottomStatusLine(width int) string {
 	case m.running:
 		status = "running"
 		statusStyle = lipgloss.NewStyle().Foreground(p.Primary).Bold(true)
+	case m.bgAlive():
+		// The run is working, only its render is detached. "running" here
+		// would lie about the free input; "background" names the state.
+		status = "background"
+		statusStyle = lipgloss.NewStyle().Foreground(p.Primary)
 	case m.loading:
 		status = "starting"
 		statusStyle = lipgloss.NewStyle().Foreground(p.Primary)

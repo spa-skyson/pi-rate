@@ -67,7 +67,8 @@ func TestKeyRegistry_CoversHotkeys(t *testing.T) {
 	want := map[string]string{ // key → ID
 		"ctrl+r":    "key.retry",
 		"ctrl+o":    "key.compact-tools",
-		"ctrl+b":    "key.branch",
+		"ctrl+b":    "key.background",
+		"ctrl+g":    "key.branch",
 		"shift+tab": "key.agent-cycle",
 		"ctrl+h":    "key.history",
 		"ctrl+t":    "key.monitor",
@@ -137,7 +138,8 @@ func TestHotkeyFor_ResolvesRegistryKeys(t *testing.T) {
 	}{
 		{"ctrl+r retries", tea.Key{Code: 'r', Mod: tea.ModCtrl}, "key.retry"},
 		{"ctrl+o compacts", tea.Key{Code: 'o', Mod: tea.ModCtrl}, "key.compact-tools"},
-		{"ctrl+b branch", tea.Key{Code: 'b', Mod: tea.ModCtrl}, "key.branch"},
+		{"ctrl+b backgrounds", tea.Key{Code: 'b', Mod: tea.ModCtrl}, "key.background"},
+		{"ctrl+g branch", tea.Key{Code: 'g', Mod: tea.ModCtrl}, "key.branch"},
 		{"shift+tab cycles", tea.Key{Code: tea.KeyTab, Mod: tea.ModShift}, "key.agent-cycle"},
 		{"ctrl+h history", tea.Key{Code: 'h', Mod: tea.ModCtrl}, "key.history"},
 		{"ctrl+t monitor", tea.Key{Code: 't', Mod: tea.ModCtrl}, "key.monitor"},

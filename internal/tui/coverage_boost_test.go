@@ -864,16 +864,16 @@ func TestHandleKey_CtrlO_ToggleTools(t *testing.T) {
 	}
 }
 
-func TestHandleKey_CtrlB_TogglePopup(t *testing.T) {
+func TestHandleKey_CtrlG_TogglePopup(t *testing.T) {
 	m := newTestModelFull(t)
 	m.statusModel.GitBranch = "main"
 	// First press: opens popup (may be empty if git unavailable).
-	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
+	_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 	// If a popup was created, send another to close it.
 	if m.branchPopup != nil {
-		_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
+		_, _ = m.handleKey(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
 		if m.branchPopup != nil {
-			t.Error("expected popup closed after second Ctrl+B")
+			t.Error("expected popup closed after second Ctrl+G")
 		}
 	}
 }
