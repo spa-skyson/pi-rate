@@ -83,6 +83,19 @@ func declaration(tl tool.Tool) *genai.FunctionDeclaration {
 	return nil
 }
 
+// web_search is opt-in (WithWebSearch / PI_WEB_SEARCH), so it is absent from
+// the default set the budget above covers; pin its description here so it
+// cannot balloon unnoticed (issue #73).
+func TestSchemaDiet_WebSearchDescriptionBudget(t *testing.T) {
+	ws, err := newWebSearchTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := ws.Description(); len(d) > 700 {
+		t.Errorf("web_search description = %d chars, budget 700", len(d))
+	}
+}
+
 func declSize(m map[string]any) int {
 	raw, err := json.Marshal(m)
 	if err != nil {

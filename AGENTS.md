@@ -118,7 +118,7 @@ long-lived uncommitted work in the primary checkout.
 
 Agents marked `[worktree]` edit an isolated tree. Their edits do **not** land in
 the caller's tree — ask for an explicit patch or file list to apply, or use a
-non-worktree editing agent (`internal/tools/subagent.go:249`).
+non-worktree editing agent (`internal/tools/subagent.go:238`).
 
 ## Commits: all commits must be signed
 

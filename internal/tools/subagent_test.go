@@ -421,6 +421,12 @@ func TestBuildSubagentDescription(t *testing.T) {
 	if !strings.Contains(desc, "exact patch or file list") {
 		t.Error("description should explain the handoff needed for worktree edits")
 	}
+	if !strings.Contains(desc, "max 8") {
+		t.Error("description should state the per-call parallel cap (max 8)")
+	}
+	if !strings.Contains(desc, "{previous}") {
+		t.Error("description should show chain tasks referencing {previous}")
+	}
 }
 
 // --- SubagentTools registration test ---

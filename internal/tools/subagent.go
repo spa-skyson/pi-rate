@@ -235,7 +235,7 @@ func buildSubagentDescription(orch *subagent.Orchestrator) string {
 - parallel: {tasks: [{agent, task}, ...]} — concurrent, max 8 per call
 - chain: {chain: [{agent, task}, ...]} — sequential; each task may reference {previous}
 
-Background suits long independent work. [worktree] agents edit an isolated git worktree; their edits never land in this tree — ask for an exact patch or file list.
+Background suits long independent work. [worktree] agents edit an isolated git worktree; their edits never land in this tree — ask for an exact patch or file list, or use a non-worktree agent.
 
 base (single mode): a worktree starts at HEAD, so a committed change reads as an empty diff. Pass base:"<ref>" to compare against it — the agent sees base..HEAD as a pending diff and reads post-change files; works for read-only agents too. For a branch use its merge base (a long-merged PR needs the commit checked out: base compares against the current tip).
 
