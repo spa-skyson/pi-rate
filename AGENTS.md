@@ -218,6 +218,25 @@ unknown locally), even a couple with `B` status. All predate the fork and are
 shared published history; rewriting them would invalidate every clone and
 desync from upstream. Record, don't repair.
 
+### Mirror drift and the converge merge
+
+The mirror can drift from `gitlab/main`: a PR merged through the GitHub web
+UI lands on `origin/main` only, and gitlab never sees it. Converging means
+merging `origin/main` into gitlab as an **empty converge merge** and pushing
+the result back to origin — a push that carries the unsigned GitLab-created
+merge commits and is therefore rejected by `pre-push`. Do not reach for
+`--no-verify`; run the one push with the narrow escape hatch, in the spirit
+of `PI_ALLOW_LARGE_FILES`:
+
+```bash
+PI_PREPUSH_ALLOW_SERVER_MERGES=1 git push origin main
+```
+
+The variable passes **only unsigned merge commits** (two or more parents) —
+they warn and go through, since server-side merges are legal per the
+paragraph above. Unsigned **non-merge** commits still fail unconditionally,
+and the Signed-off-by and size checks are unchanged for every commit.
+
 ### Never use `--no-verify`
 
 **Do not pass `--no-verify` to `git commit`, ever.** Not to unblock a failing

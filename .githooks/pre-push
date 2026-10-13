@@ -26,6 +26,19 @@
 #
 # Skipped worktrees (prunable entries) are ignored. Merge commits created by
 # git itself are checked like any other commit.
+#
+# One sanctioned exception: mirror convergence. A PR merged through the
+# GitHub web UI lands on origin/main only, and the fix is an empty converge
+# merge on gitlab pushed back to origin — a push that carries the unsigned
+# GitLab-created merge commits with it. Those commits are legal here
+# (AGENTS.md: "GitLab-created merge commits on main are unsigned ... Do not
+# 'fix' them") but they cannot be re-signed locally, so without an exception
+# the mirror could never converge again. PI_PREPUSH_ALLOW_SERVER_MERGES=1 is
+# that exception, scoped as narrowly as PI_ALLOW_LARGE_FILES in
+# check-large-files: with it set, unsigned commits that ARE merges (two or
+# more parents) warn instead of failing. Unsigned non-merge commits still
+# fail unconditionally, the Signed-off-by and size checks are unchanged for
+# every commit, and without the variable the hook behaves exactly as before.
 set -euo pipefail
 
 remote="$1"
@@ -34,6 +47,10 @@ zero=0000000000000000000000000000000000000000
 unsigned=()
 missing_sob=()
 size_scan=()
+server_merges=()
+
+# Set only for the mirror-converge push; see the header comment.
+allow_server_merges="${PI_PREPUSH_ALLOW_SERVER_MERGES:-}"
 
 # Without this file `git verify-commit` cannot verify anything, so every commit
 # would look unsigned and the hook would be useless whichever way it failed.
@@ -48,6 +65,12 @@ fi
 
 verify_signature() {
   git verify-commit "$1" >/dev/null 2>&1
+}
+
+# A merge commit has two or more parents; `git rev-list --parents -n 1`
+# prints the commit followed by every parent.
+is_merge() {
+  [ "$(git rev-list --parents -n 1 "$1" | wc -w)" -gt 2 ]
 }
 
 while read -r local_ref local_sha remote_ref remote_sha; do
@@ -72,7 +95,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
   for sha in $range; do
     if ! verify_signature "$sha"; then
-      unsigned+=("$sha")
+      if [ -n "$allow_server_merges" ] && is_merge "$sha"; then
+        server_merges+=("$sha")
+      else
+        unsigned+=("$sha")
+      fi
     fi
     trailers="$(git log --format='%(trailers:key=Signed-off-by,valueonly)' -1 "$sha")"
     committer_email="$(git log --format='%ce' -1 "$sha")"
@@ -87,6 +114,10 @@ done
 fail=0
 if [ "${#size_scan[@]}" -gt 0 ]; then
   "$(dirname "$0")/check-large-files" commits "${size_scan[@]}" || fail=1
+fi
+if [ "${#server_merges[@]}" -gt 0 ]; then
+  echo "pre-push: WARNING: server-side merge commits allowed by PI_PREPUSH_ALLOW_SERVER_MERGES (unsigned):" >&2
+  printf '  %s\n' "${server_merges[@]}" >&2
 fi
 if [ "${#unsigned[@]}" -gt 0 ]; then
   echo "pre-push: commits whose signature is missing or INVALID cannot be pushed:" >&2
