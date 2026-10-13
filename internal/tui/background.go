@@ -414,6 +414,11 @@ func (m *model) attachBackground(bg *backgroundRun) (tea.Model, tea.Cmd) {
 	if bg.started.IsZero() {
 		bg.started = now
 	}
+	// The swap of m.pendingPrompts is safe in both directions: an idle
+	// session's queue is empty by construction — a prompt submitted while
+	// idle starts immediately (handleInputSubmit → startNextPrompt), so
+	// only a RUNNING session can hold queued prompts, and attach refuses
+	// exactly that state.
 	// Retry state and window title follow the transcript back: Ctrl+R
 	// replays THIS session's failed prompt, the title names the session now
 	// on screen, and the displaced session keeps its own for its attach.
@@ -678,9 +683,16 @@ func (m *model) cancelBackgroundSlot(bg *backgroundRun) tea.Cmd {
 // cancelAllBackgroundSlots stops every live slot — the Ctrl+C quit path:
 // nothing survives into quit with a loop still writing.
 // cancelAllBackgroundSlots stops every live slot — the Ctrl+C quit path.
+// Each slot's inbox is emptied BEFORE the cancel: finishSlotRun restarts a
+// slot's own queue on finalize, and without the drain the first Ctrl+C
+// would resurrect the next queued prompt, flip bgAlive back to true, and
+// make quit unreachable until every queue drained — with the resurrected
+// runs executing tool calls between presses. Quit drains everything: no
+// run and no queued prompt survives it.
 func (m *model) cancelAllBackgroundSlots() tea.Cmd {
 	var cmds []tea.Cmd
 	for _, s := range m.liveSlots() {
+		s.inbox = nil
 		if c := m.cancelBackgroundSlot(s); c != nil {
 			cmds = append(cmds, c)
 		}
@@ -734,10 +746,6 @@ type BackgroundStatus struct {
 	Parked  bool // no run of its own (a /new parking, an attach's displaced session)
 	Await   bool // holds a stashed approval/question — the ⚑ badge
 }
-
-// Idle reports whether the slot has nothing running and nothing to review:
-// a parked session waiting only for its attach.
-func (s *BackgroundStatus) Idle() bool { return s.Parked || (s.Done && s.Events == 0) }
 
 // backgroundStatus snapshots one slot for the popup rows.
 func backgroundStatus(bg *backgroundRun) *BackgroundStatus {

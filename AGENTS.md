@@ -818,7 +818,11 @@ never silently.
   `handleAgentDone`, which would clobber the active slot's `m.running`,
   dialogs, plan state and queue mid-turn. Esc-Esc cancels the NEWEST live
   slot's run through its own cancel func and finalizes it synthetically
-  (stack discipline); Ctrl+C cancels the active turn and every live slot.
+  (stack discipline); Ctrl+C cancels the active turn and every live slot
+  and EMPTIES their inboxes first — without the drain each finalize would
+  resurrect the next queued prompt and make quit unreachable. Dismissing a
+  slot from the popup drains the same way: dismissal ends a session, it
+  does not continue it.
 - **Cross-session messages carry a session tag.** Approval and question
   requests are tagged at the per-agent asker closures; the tag is the whole
   route (`slotBySession`: active → dialog, its slot → stash + ⚑ badge). An

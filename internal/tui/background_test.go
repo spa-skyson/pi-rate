@@ -182,15 +182,6 @@ func slotNotices(bg *backgroundRun) string {
 	return b.String()
 }
 
-// slotByID finds a registry slot by session id in tests — the same lookup
-// production routing does, kept explicit so a test names what it drives.
-func slotByID(m *model, sid string) *backgroundRun {
-	if s := m.slotBySession(sid); s != nil {
-		return s
-	}
-	return nil
-}
-
 // ctrlB is the background hotkey as the terminal delivers it.
 func ctrlB() tea.Key { return tea.Key{Code: 'b', Mod: tea.ModCtrl} }
 
@@ -589,7 +580,7 @@ func TestBackground_ThreeSlotsLiveParallel(t *testing.T) {
 		if attached[target] {
 			target = m.slots[1].sessionID
 		}
-		model2, _ := m.attachBackground(slotByID(m, target))
+		model2, _ := m.attachBackground(m.slotBySession(target))
 		m = model2.(*model)
 		if m.cfg.SessionID != target {
 			t.Fatalf("attach %d: active session = %s, want %s", i, m.cfg.SessionID, target)
@@ -1081,7 +1072,9 @@ func TestBackground_EscEscTargetsNewestLiveSlot(t *testing.T) {
 }
 
 // TestBackground_QuitCancelsAllSlots: the first Ctrl+C cancels the active
-// turn AND every live slot at once, warning before the second press quits.
+// turn AND every live slot at once — draining their inboxes, so no
+// resurrected prompt flips bgAlive back to true between presses — warning
+// before the second press quits.
 func TestBackground_QuitCancelsAllSlots(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
@@ -1090,10 +1083,12 @@ func TestBackground_QuitCancelsAllSlots(t *testing.T) {
 	_ = m.startAgentLoop("task one")
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
+	m.slots[0].inbox = []queuedPrompt{{text: "queued one"}}
 	m.beginTurn()
 	_ = m.startAgentLoop("task two")
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
+	m.slots[1].inbox = []queuedPrompt{{text: "queued two"}}
 	m.beginTurn()
 	_ = m.startAgentLoop("active turn")
 	if !m.running || len(m.liveSlots()) != 2 {
@@ -1106,9 +1101,15 @@ func TestBackground_QuitCancelsAllSlots(t *testing.T) {
 	if m.running {
 		t.Fatal("Ctrl+C did not cancel the active turn")
 	}
+	if m.bgAlive() {
+		t.Fatal("a slot survived the quit-cancel live — quit would be unreachable")
+	}
 	for i, s := range m.slots {
 		if !s.done {
 			t.Fatalf("slot %d survived the quit-cancel", i)
+		}
+		if len(s.inbox) != 0 {
+			t.Fatalf("slot %d kept %d inbox prompts — quit resurrected them next", i, len(s.inbox))
 		}
 	}
 	if m.quitting {
