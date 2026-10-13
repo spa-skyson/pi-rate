@@ -15,6 +15,7 @@ const (
 	overlayLogin
 	overlaySkillCreate
 	overlayBranchPopup
+	overlaySessions
 	overlaySubagentViewer
 	overlaySearchPopup
 	overlaySteerInput
@@ -36,6 +37,7 @@ var overlayKinds = []OverlayKind{
 	overlayLogin,
 	overlaySkillCreate,
 	overlayBranchPopup,
+	overlaySessions,
 	overlaySubagentViewer,
 	overlaySearchPopup,
 	overlaySteerInput,
@@ -247,6 +249,13 @@ func (m *model) overlayEntryFor(kind OverlayKind) overlayEntry {
 			keyHandler: m.handleBranchPopupKey,
 			alive:      func(*model) bool { return m.branchPopup != nil },
 			onClose:    func(*model) { m.branchPopup = nil },
+		}
+	case overlaySessions:
+		return overlayEntry{
+			kind:       kind,
+			keyHandler: m.handleSlotsPopupKey,
+			alive:      func(*model) bool { return m.slotsPopup != nil },
+			onClose:    func(*model) { m.slotsPopup = nil },
 		}
 	case overlaySubagentViewer:
 		return overlayEntry{
