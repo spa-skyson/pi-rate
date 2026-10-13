@@ -796,18 +796,36 @@ never silently.
   or approval dialog is open, `handleAgentDone` dismisses it and notices the
   user — a tool waiting for an answer that will never come must not wedge the
   TUI (`internal/tui/agent_loop.go:2264-2285`).
-- **At most one live main agent loop; a backgrounded run holds the agent.**
-  Ctrl+B detaches the running turn — the loop keeps working, its events buffer
-  instead of rendering — but it does not free the *agent*, only the input:
-  while the detached run is alive, new prompts queue instead of starting and
-  agent/model switches refuse, because `RebuildWithSession` and
-  `RebuildWithModel` mutate the `*Agent` in place under the live loop
-  (`internal/tui/background.go`; guards in `startNextPrompt`,
-  `startAgentLoop`, `applyAgent`, `handleModelCommand`, `handleRetry`, and the
-  slash branch of `handleInputSubmit`). A finished or Esc-canceled background
-  run frees the agent without an attach. Channel readers never change hands:
-  every channel keeps its single parked reader through detach and attach —
-  the run channel's events arrive in envelopes naming their run, so a
-  canceled run's late events are swallowed instead of being mistaken for the
-  next turn's, and subagent events always re-arm `waitForSubEvent`, their own
-  reader — routing, never a second goroutine.
+- **One live loop per session slot; a slot owns its session whole.**
+  Ctrl+B forks: the running session moves WHOLE into a background slot — its
+  agent, transcript, inbox, channel and loop — and the session factory
+  (`Config.NewSessionAgent`) opens a fresh, empty active session. The loop
+  keeps executing on the agent it started with; the slot's agent is frozen
+  while its loop lives, and only an agent with no live loop in ITS slot may
+  be rebuilt (`RebuildWithSession`/`RebuildWithModel` target the active
+  slot's agent alone — that is why agent/model switches and slash commands
+  work while a slot runs). Ownership moves, it never copies: deltas never
+  cross slots, and a detached run keeps writing its own `events.jsonl`
+  through the SessionService — durability is the run's, not the render's
+  (`internal/tui/background.go`).
+- **A run's final writes only to its own slot.** A background final goes
+  through `finishSlotRun` — done flags, stashed requests denied, notice +
+  attention, the slot's OWN inbox restarted — never through
+  `handleAgentDone`, which would clobber the active slot's `m.running`,
+  dialogs, plan state and queue mid-turn. Esc-Esc cancels the slot's run
+  through its own cancel func and finalizes it synthetically.
+- **Cross-session messages carry a session tag.** Approval and question
+  requests are tagged at the per-agent asker closures; the tag is the whole
+  route (active → dialog, background slot → stash + ⚑). An untagged or
+  unknown-tagged request is denied and logged — never routed by guessing
+  who is running.
+- **Channel readers never change hands — on every channel.** Each run
+  channel keeps its single parked reader through detach and attach, armed as
+  a `slotEnvelope` naming its channel from the start: classification is by
+  CHANNEL, never by pointer, so a canceled run's late events and a second
+  detach over the same channel are routed to the run that owns the channel
+  instead of being mistaken for the next turn's. Subagent events always
+  re-arm `waitForSubEvent`, their own reader — routing, never a second
+  goroutine. Documented exceptions: a `/run` cycle cannot be backgrounded
+  (its events bypass the run channel), and plan sessions refuse detach
+  (plan state is still global).

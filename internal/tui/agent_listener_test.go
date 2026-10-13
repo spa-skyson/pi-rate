@@ -33,7 +33,7 @@ func TestUnclaimedMessageDoesNotArmAgentListener(t *testing.T) {
 
 // TestWindowSizeDoesNotArmAgentListener covers the same invariant for a resize,
 // which is handled (so it never reaches Update's fallback) and used to batch a
-// waitForAgent of its own. Every mid-turn resize therefore leaked one reader.
+// waitForSlotAgent of its own. Every mid-turn resize therefore leaked one reader.
 func TestWindowSizeDoesNotArmAgentListener(t *testing.T) {
 	ch := make(chan agentMsg, 4)
 	m := &model{running: true, agentCh: ch}

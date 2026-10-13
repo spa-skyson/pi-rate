@@ -175,12 +175,12 @@ func TestApprovalRequest_FiresAttentionOnce(t *testing.T) {
 	// A spare request so the re-armed waitForApproval listener (part of the
 	// returned batch) returns instead of blocking this test's goroutine the
 	// way it would never block the real command runner.
-	spare := make(chan permission.ApprovalRequest, 2)
+	spare := make(chan SessionApproval, 2)
 	m.cfg.ApprovalCh = spare
-	spare <- permission.ApprovalRequest{}
+	spare <- SessionApproval{SessionID: "sess-a"}
 
 	req := permission.ApprovalRequest{Tool: "bash", Reply: make(chan permission.ApprovalResult, 1)}
-	_, cmd := m.handleApprovalRequest(approvalRequestMsg{req: req})
+	_, cmd := m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: req, SessionID: "sess-a"}})
 	seqs := runCmd(cmd)
 	want := attentionBellSeq + attentionNotifySeq("☠ Pi-rate", "Approval required: bash")
 	if len(seqs) != 1 || seqs[0] != want {
@@ -192,9 +192,9 @@ func TestApprovalRequest_FiresAttentionOnce(t *testing.T) {
 
 	// Focused: the listener still re-arms, no signal. Another spare keeps the
 	// re-armed listener from blocking runCmd.
-	spare <- permission.ApprovalRequest{}
+	spare <- SessionApproval{SessionID: "sess-a"}
 	m.focused = true
-	_, cmd = m.handleApprovalRequest(approvalRequestMsg{req: req})
+	_, cmd = m.handleApprovalRequest(approvalRequestMsg{sa: SessionApproval{Req: req, SessionID: "sess-a"}})
 	if seqs := runCmd(cmd); len(seqs) != 0 {
 		t.Fatalf("focused approval produced sequences: %v", seqs)
 	}

@@ -9,12 +9,13 @@ import (
 	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/permission"
 	"github.com/spa-skyson/pi-rate/internal/tools"
+	"github.com/spa-skyson/pi-rate/internal/tui"
 )
 
 func TestApprovalAsker(t *testing.T) {
 	t.Run("delivers the request and returns the answer", func(t *testing.T) {
-		ch := make(chan permission.ApprovalRequest)
-		ask := approvalAsker(ch)
+		ch := make(chan tui.SessionApproval)
+		ask := approvalAsker(ch, "sess_test")
 
 		done := make(chan permission.ApprovalResult, 1)
 		go func() {
@@ -27,7 +28,11 @@ func TestApprovalAsker(t *testing.T) {
 
 		var req permission.ApprovalRequest
 		select {
-		case req = <-ch:
+		case tagged := <-ch:
+			req = tagged.Req
+			if tagged.SessionID != "sess_test" {
+				t.Errorf("session tag = %q, want sess_test — the TUI routes by it", tagged.SessionID)
+			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("request never reached the dialog channel")
 		}
@@ -47,11 +52,11 @@ func TestApprovalAsker(t *testing.T) {
 	})
 
 	t.Run("canceled turn denies without reaching the channel", func(t *testing.T) {
-		ch := make(chan permission.ApprovalRequest, 1)
+		ch := make(chan tui.SessionApproval, 1)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		got := approvalAsker(ch)(ctx, permission.ApprovalRequest{
+		got := approvalAsker(ch, "sess_test")(ctx, permission.ApprovalRequest{
 			Reply: make(chan permission.ApprovalResult, 1),
 		})
 		if got.Allowed {
@@ -65,21 +70,21 @@ func TestApprovalAsker(t *testing.T) {
 	})
 
 	t.Run("cancellation while waiting for the answer denies", func(t *testing.T) {
-		ch := make(chan permission.ApprovalRequest)
+		ch := make(chan tui.SessionApproval)
 		ctx, cancel := context.WithCancel(context.Background())
 
 		done := make(chan permission.ApprovalResult, 1)
 		reqCh := make(chan permission.ApprovalRequest, 1)
 		go func() {
-			done <- approvalAsker(ch)(ctx, permission.ApprovalRequest{
+			done <- approvalAsker(ch, "sess_test")(ctx, permission.ApprovalRequest{
 				Tool:  "edit",
 				Reply: make(chan permission.ApprovalResult, 1), // buffered: a late answer never blocks
 			})
 		}()
 
 		select {
-		case req := <-ch:
-			reqCh <- req
+		case tagged := <-ch:
+			reqCh <- tagged.Req
 			cancel() // the turn dies while the dialog is still up, unanswered
 		case <-time.After(5 * time.Second):
 			t.Fatal("request never reached the channel")
@@ -125,9 +130,9 @@ func TestDeferredCallbacks_PermissionBridge(t *testing.T) {
 	}}
 
 	tool := &namedToolStub{name: "edit"}
-	callback := func(t *testing.T, bridge chan permission.ApprovalRequest) func() error {
+	callback := func(t *testing.T, bridge chan tui.SessionApproval) func() error {
 		t.Helper()
-		cbs := buildDeferredCallbacks(cfg, "anthropic", sandbox, nil, nil, bridge)
+		cbs := buildDeferredCallbacks(cfg, "anthropic", sandbox, nil, nil, bridge, "sess-cbs")
 		if len(cbs.beforeTool) == 0 {
 			t.Fatal("no before-tool callbacks installed")
 		}
@@ -145,18 +150,21 @@ func TestDeferredCallbacks_PermissionBridge(t *testing.T) {
 	})
 
 	t.Run("with a bridge ask consults the dialog channel", func(t *testing.T) {
-		ch := make(chan permission.ApprovalRequest, 1)
+		ch := make(chan tui.SessionApproval, 1)
 		errCh := make(chan error, 1)
 		go func() {
 			errCh <- callback(t, ch)()
 		}()
 
 		select {
-		case req := <-ch:
-			if req.Tool != "edit" {
-				t.Errorf("dialog got tool %q, want edit", req.Tool)
+		case tagged := <-ch:
+			if tagged.Req.Tool != "edit" {
+				t.Errorf("dialog got tool %q, want edit", tagged.Req.Tool)
 			}
-			req.Reply <- permission.ApprovalResult{Allowed: true}
+			if tagged.SessionID == "" {
+				t.Error("the bridge did not tag the request with a session — the TUI would deny it")
+			}
+			tagged.Req.Reply <- permission.ApprovalResult{Allowed: true}
 		case <-time.After(5 * time.Second):
 			t.Fatal("ask request never reached the bridge")
 		}

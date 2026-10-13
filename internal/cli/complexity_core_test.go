@@ -801,7 +801,7 @@ func TestDeferredInitCoreTools(t *testing.T) {
 	root := t.TempDir()
 	var res initResources
 
-	coreTools, err := deferredInitCoreTools(root, "", "", nil, nil, &res)
+	coreTools, err := deferredInitCoreTools(root, "", "", "", nil, nil, &res)
 	if err != nil {
 		t.Fatalf("deferredInitCoreTools: %v", err)
 	}
@@ -945,7 +945,7 @@ func TestBuildDeferredCallbacks(t *testing.T) {
 	mgr := lsp.NewManager(nil)
 	t.Cleanup(mgr.Shutdown)
 
-	base := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, nil, nil, nil)
+	base := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, nil, nil, nil, "sess-cbs")
 	if base.deduper == nil {
 		t.Error("deduper is nil")
 	}
@@ -968,14 +968,14 @@ func TestBuildDeferredCallbacks(t *testing.T) {
 
 	// Adding LSP or a memory recorder must still yield a single composed
 	// callback, since they are folded into the same chain.
-	withLSP := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, mgr, nil, nil)
+	withLSP := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, mgr, nil, nil, "sess-cbs")
 	if len(withLSP.afterTool) != 1 {
 		t.Errorf("after-tool callbacks with an LSP manager = %d, want 1 composed callback",
 			len(withLSP.afterTool))
 	}
 
 	rec := newDeferredMemoryRecorder(config.Config{}, t.TempDir())
-	withMem := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, nil, rec, nil)
+	withMem := buildDeferredCallbacks(config.Config{}, "anthropic", sandbox, nil, rec, nil, "sess-cbs")
 	if len(withMem.afterTool) != 1 {
 		t.Errorf("after-tool callbacks with a memory recorder = %d, want 1 composed callback",
 			len(withMem.afterTool))
@@ -994,7 +994,7 @@ func TestResolveDeferredSessionResumed(t *testing.T) {
 	// ag is never touched on the resume path: the session ID is already known,
 	// so CreateSession is not reached. Passing nil pins that.
 	sessionID, title, resumed, err := resolveDeferredSession(
-		context.Background(), nil, svc, &cliMockLLM{name: "test-model"}, "anthropic", "http://x.invalid", "")
+		context.Background(), nil, svc, &cliMockLLM{name: "test-model"}, "anthropic", "http://x.invalid", "existing-session", false)
 	if err != nil {
 		t.Fatalf("resolveDeferredSession: %v", err)
 	}

@@ -17,25 +17,26 @@ import (
 // falls through, so typing continues into the prompt and nothing is lost; only
 // submission is withheld, because Enter is taken by the dialog.
 
-// approvalRequestMsg carries one tool-approval request from the gate.
+// approvalRequestMsg carries one tool-approval request from the gate, with
+// the session tag the asker stamped on it (types.go).
 type approvalRequestMsg struct {
-	req permission.ApprovalRequest
+	sa SessionApproval
 }
 
 // waitForApproval parks a reader on the approval channel and delivers the next
 // request as a message. Re-armed after each delivery, like waitForSystemNotice
 // — exactly one reader is ever parked, so a channel close cannot multiply
 // wakeups.
-func waitForApproval(ch <-chan permission.ApprovalRequest) tea.Cmd {
+func waitForApproval(ch <-chan SessionApproval) tea.Cmd {
 	if ch == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		req, ok := <-ch
+		sa, ok := <-ch
 		if !ok {
 			return nil
 		}
-		return approvalRequestMsg{req: req}
+		return approvalRequestMsg{sa: sa}
 	}
 }
 
@@ -51,7 +52,7 @@ func (m *model) handleApprovalRequest(msg approvalRequestMsg) (tea.Model, tea.Cm
 		// stopped reading, and show the new one.
 		m.approval.Reply <- permission.ApprovalResult{}
 	}
-	req := msg.req
+	req := msg.sa.Req
 	m.approval = &req
 	m.openOverlay(overlayApproval)
 	// Attention first: the loop is blocked until the dialog is answered, so a
