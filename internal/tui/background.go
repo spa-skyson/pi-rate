@@ -87,6 +87,11 @@ type backgroundRun struct {
 	// important state: attach opens its dialog, a dead run answers it denied.
 	approval *permission.ApprovalRequest
 	question *tools.QuestionRequest
+
+	// parked marks a session with no run of its own — a /new parking or an
+	// attach's displaced session. It renders "idle", not "✓": nothing
+	// happened in it since it left the screen.
+	parked bool
 }
 
 // slotEnvelope wraps an event read from a run channel, carrying the channel
@@ -118,11 +123,74 @@ func (b *backgroundRun) record(msg agentMsg) {
 	b.buf = append(b.buf, msg)
 }
 
-// bgAlive reports whether the background slot is still working. A finished
-// one stays until attach (its buffer is the replay), but it holds nothing
-// the active slot needs.
+// bgAlive reports whether any slot in the registry still runs a loop. A
+// finished or parked slot stays until attach (its buffer is the replay, its
+// transcript the conversation), but it holds nothing that gates the active
+// slot.
 func (m *model) bgAlive() bool {
-	return m.bg != nil && !m.bg.done
+	return len(m.liveSlots()) > 0
+}
+
+// --- the slot registry ------------------------------------------------------
+
+// addSlot appends a slot to the registry. Insertion order is the popup's
+// order; nothing reorders the list, so a slot keeps its row for its whole
+// life.
+func (m *model) addSlot(s *backgroundRun) {
+	m.slots = append(m.slots, s)
+}
+
+// slotByChannel finds the slot whose run channel the envelope names. The
+// whole routing rests on this: a channel belongs to exactly one run — the
+// active one is never in the registry, a registry slot's is never m.agentCh
+// — so the match is unambiguous, and a second detach of a later turn lands
+// on a fresh channel.
+func (m *model) slotByChannel(ch chan agentMsg) *backgroundRun {
+	if ch == nil {
+		return nil
+	}
+	for _, s := range m.slots {
+		if s.ch == ch {
+			return s
+		}
+	}
+	return nil
+}
+
+// slotBySession finds the slot owning a session id — how a tagged
+// approval/question request finds its addressee.
+func (m *model) slotBySession(id string) *backgroundRun {
+	if id == "" {
+		return nil
+	}
+	for _, s := range m.slots {
+		if s.sessionID == id {
+			return s
+		}
+	}
+	return nil
+}
+
+// liveSlots lists the slots with a running loop.
+func (m *model) liveSlots() []*backgroundRun {
+	var out []*backgroundRun
+	for _, s := range m.slots {
+		if !s.done {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// newestLiveSlot is the Esc-Esc cancel target: the most recently detached
+// run still working — stack discipline, the thing the input was freed from
+// last.
+func (m *model) newestLiveSlot() *backgroundRun {
+	live := m.liveSlots()
+	if len(live) == 0 {
+		return nil
+	}
+	return live[len(live)-1]
 }
 
 // backgroundTickMsg repaints the status bar while a detached run is alive —
@@ -133,19 +201,24 @@ func armBackgroundTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return backgroundTickMsg{} })
 }
 
-// toggleBackground is Ctrl+B: detach the running session into its own
-// background slot, or attach that slot back. Idle, there is nothing to
-// background; a /run cycle cannot be backgrounded at all — its events bypass
-// the agent channel, so a detached entry would never see the cycle's end and
-// wedge the queue.
+// toggleBackground is Ctrl+B. Running, it detaches — every detach adds one
+// slot, which is how the registry grows to N (sequential run+detach cycles).
+// Idle, it attaches the single slot back, opens the registry popup when
+// several are parked, or explains itself; a /run cycle cannot be backgrounded
+// at all — its events bypass the agent channel, so a detached entry would
+// never see the cycle's end and wedge the queue.
 func (m *model) toggleBackground() (tea.Model, tea.Cmd) {
 	switch {
-	case m.bg != nil:
-		return m.attachBackground()
 	case m.running && m.runCycleActive():
 		return m, m.setFlash("/run cycles cannot be backgrounded — wait for the cycle to finish")
 	case m.running:
 		return m.detachRun()
+	case len(m.slots) == 0:
+		return m, m.setFlash("Nothing to background")
+	case len(m.slots) > 0:
+		// Interim registry state: attach the oldest slot; the /slots popup
+		// over several slots arrives with the popup commit.
+		return m.attachBackground(m.slots[0])
 	default:
 		return m, m.setFlash("Nothing to background")
 	}
@@ -188,29 +261,44 @@ func (b *backgroundRun) appendNotice(text string) {
 // detachRun forks: the running session moves whole into a background slot,
 // and the factory opens a fresh session in the active slot. The loop keeps
 // running on the agent and in the session it started with — only the
-// rendering detaches. Ownership moves, it never copies (AGENTS.md): the
-// transcript, the inbox, the agent, the channel and the cancel func are the
-// slot's now; the active model gets fresh fields from the factory.
+// rendering detaches. Every detach adds one slot; N background sessions come
+// from N sequential run+detach cycles.
 func (m *model) detachRun() (tea.Model, tea.Cmd) {
+	model, cmd, ok := m.parkActiveSession(false)
+	if !ok {
+		return model, nil
+	}
+	return model, cmd
+}
+
+// parkActiveSession moves the active session's state into a new slot and
+// swaps the factory's fresh session in. It serves both detach (idle=false:
+// the slot inherits the live loop's channel and cancel, and the loop keeps
+// running in the slot) and /new (idle=true: the slot parks with no loop at
+// all — done from birth). Ownership moves, it never copies (AGENTS.md): the
+// transcript, the inbox, the agent, the channel and the cancel func are the
+// slot's; the active model gets fresh fields from the factory. Reports
+// whether the park happened.
+func (m *model) parkActiveSession(idle bool) (tea.Model, tea.Cmd, bool) {
 	if m.mode == "plan" {
 		// Plan state (mode, planWorktree, phases) is still global model
 		// state; finalizing a detached plan run must never write it under
 		// the active slot. Not slotted yet — refuse, naming the reason
 		// (documented exception, design §7).
-		return m, m.setFlash("Plan sessions cannot be backgrounded yet — wait for the plan to finish")
+		return m, m.setFlash("Plan sessions cannot be backgrounded yet — wait for the plan to finish"), false
 	}
 	if m.cfg.NewSessionAgent == nil {
-		return m, m.setFlash("Cannot background: no session factory in this context")
+		return m, m.setFlash("Cannot background: no session factory in this context"), false
 	}
 	ag, sid, title, err := m.cfg.NewSessionAgent(m.ctx, m.cfg.LLM)
 	if err != nil {
 		m.chatModel.AppendError(fmt.Sprintf("Backgrounding failed: %v", err))
-		return m, nil
+		return m, nil, false
 	}
-	m.bg = &backgroundRun{
+	slot := &backgroundRun{
 		started:          time.Now(),
-		ch:               m.agentCh,
-		cancel:           m.agentCancel,
+		done:             idle, // an idle session parks with no loop to wait for
+		finished:         time.Now(),
 		sessionID:        m.cfg.SessionID,
 		agent:            m.cfg.Agent,
 		messages:         m.chatModel.Messages,
@@ -219,12 +307,18 @@ func (m *model) detachRun() (tea.Model, tea.Cmd) {
 		lastPrompt:       m.lastPrompt,
 		lastMentions:     m.lastMentions,
 		lastPromptFailed: m.lastPromptFailed,
+		parked:           idle,
 	}
+	if !idle {
+		slot.ch = m.agentCh
+		slot.cancel = m.agentCancel
+	}
+	m.addSlot(slot)
 	m.pendingPrompts = nil
 	m.agentCh, m.agentCancel = nil, nil
 	// Fresh active session: empty transcript, empty retry state, and the
 	// factory's default title for the window/tab. Ctrl+R must never replay
-	// the background session's prompt into the fresh one, and the todo plan
+	// the parked session's prompt into the fresh one, and the todo plan
 	// belonged to the session that just left (per-session todos are MR2).
 	m.cfg.Agent, m.cfg.SessionID = ag, sid
 	m.chatModel.Messages = make([]message, 0, 16)
@@ -241,29 +335,46 @@ func (m *model) detachRun() (tea.Model, tea.Cmd) {
 	if m.face != nil {
 		m.face.SetMood(MoodIdle)
 	}
-	m.chatModel.AppendNotice(fmt.Sprintf(
-		"Session forked — the previous session runs in the background (Ctrl+B to attach); this is a fresh session (%s).",
-		shortSessionID(sid)))
+	if idle {
+		m.chatModel.AppendNotice(fmt.Sprintf(
+			"New session — the previous one (%s) moved to the background registry (/slots to view, Ctrl+B to attach).",
+			shortSessionID(slot.sessionID)))
+	} else {
+		m.chatModel.AppendNotice(fmt.Sprintf(
+			"Session forked — the previous session runs in the background (Ctrl+B to attach); this is a fresh session (%s).",
+			shortSessionID(sid)))
+	}
 	// The forked session comes up on the base prompt; re-apply the agent the
 	// user was talking to, so a prompt typed now answers in the same voice
-	// the backgrounded run left behind. AgentSwitcher rebuilds only
-	// m.cfg.Agent — the background slot's agent is untouched, its loop safe.
+	// the parked run left behind. AgentSwitcher rebuilds only
+	// m.cfg.Agent — the parked slot's agent is untouched, its loop safe.
 	var extra tea.Cmd
 	if m.activeAgent != "" && m.cfg.AgentSwitcher != nil {
 		_, extra = m.applyAgent(m.activeAgent)
 	}
-	return m, tea.Batch(armBackgroundTick(), extra)
+	cmd := extra
+	if !idle {
+		// The status tick repaints the bar while a loop's elapsed time
+		// moves; a parked session has nothing that moves.
+		cmd = tea.Batch(armBackgroundTick(), extra)
+	}
+	return m, cmd, true
 }
 
-// attachBackground swaps the slot's session back into the active view: its
-// transcript, its inbox, its agent and — if still alive — its run. The
-// buffer replays structurally through the ordinary handlers before the swap
-// finishes, so the transcript catches up exactly where detach cut it. The
-// displaced active session goes nowhere in MR1 (one slot): its transcript
-// stays on disk in events.jsonl, resumable. A busy active session cannot
-// take the swap — refuse, and keep the slot.
-func (m *model) attachBackground() (tea.Model, tea.Cmd) {
-	bg := m.bg
+// attachBackground swaps the chosen slot's session back into the active
+// view: its transcript, its inbox, its agent and — if still alive — its
+// run. The swap is symmetric: the displaced active session stays in the
+// registry, parked in the same slot struct it swapped with — switching
+// never loses a session (design §1: a slot is born from Ctrl+B or /new,
+// and from every swap). The buffer replays structurally through the
+// ordinary handlers before the swap finishes, so the transcript catches up
+// exactly where detach cut it. A busy active session cannot take the swap —
+// refuse, and keep the slot (the v1 guard; the design's park-the-active
+// attach is a later increment).
+func (m *model) attachBackground(bg *backgroundRun) (tea.Model, tea.Cmd) {
+	if bg == nil {
+		return m, nil
+	}
 	if m.running {
 		return m, m.setFlash("The active session is running — attach when it finishes or cancel it first")
 	}
@@ -273,19 +384,27 @@ func (m *model) attachBackground() (tea.Model, tea.Cmd) {
 		// plan would finalize it into the slot's session.
 		return m, m.setFlash("Cannot attach while a plan session is active — wait for the plan to finish")
 	}
-	m.bg = nil
 
-	// Swap ownership back. What was active is dropped from the model, named
-	// in the notice so /resume can find it.
+	// Swap ownership. The slot struct ends up holding the displaced active
+	// session, parked: idle, channelless, and still in the registry.
+	wasLive := !bg.done // read before the parking writes below
 	m.cfg.Agent, bg.agent = bg.agent, m.cfg.Agent
 	m.cfg.SessionID, bg.sessionID = bg.sessionID, m.cfg.SessionID
 	m.chatModel.Messages, bg.messages = bg.messages, m.chatModel.Messages
 	m.pendingPrompts, bg.inbox = bg.inbox, nil
-	m.agentCh, m.agentCancel = bg.ch, bg.cancel
+	m.agentCh, bg.ch = bg.ch, nil
+	m.agentCancel, bg.cancel = bg.cancel, nil
 	displaced := bg.sessionID
+	now := time.Now()
+	bg.done = true   // the displaced session is idle: nothing runs in it
+	bg.parked = true // ...and it left the screen: "idle", not "✓"
+	bg.finished = now
+	if bg.started.IsZero() {
+		bg.started = now
+	}
 	// Retry state and window title follow the transcript back: Ctrl+R
 	// replays THIS session's failed prompt, the title names the session now
-	// on screen, and the displaced session keeps its own for its /resume.
+	// on screen, and the displaced session keeps its own for its attach.
 	m.lastPrompt, bg.lastPrompt = bg.lastPrompt, m.lastPrompt
 	m.lastMentions, bg.lastMentions = bg.lastMentions, m.lastMentions
 	m.lastPromptFailed, bg.lastPromptFailed = bg.lastPromptFailed, m.lastPromptFailed
@@ -316,7 +435,10 @@ func (m *model) attachBackground() (tea.Model, tea.Cmd) {
 		_, _ = m.replayAgentEvent(ev)
 	}
 	bg.buf = nil
-	if !bg.done {
+	if wasLive {
+		// The run came back to the foreground — it lives on m.agentCh now,
+		// NOT in this slot: the slot struct holds the displaced idle
+		// session after the swap, so its done flag stays true.
 		m.running = true
 		// A request that arrived detached opens its dialog only now. The
 		// channel readers were re-armed at stash time — opening the dialog
@@ -350,8 +472,9 @@ func (m *model) attachBackground() (tea.Model, tea.Cmd) {
 			m.face.SetMood(MoodIdle)
 		}
 	}
-	m.chatModel.AppendNotice("Attached — background session returned." +
-		fmt.Sprintf(" The previous session (%s) stays on disk: /resume %s.", shortSessionID(displaced), displaced))
+	m.chatModel.AppendNotice(fmt.Sprintf(
+		"Attached — background session returned. The previous session (%s) is parked in the registry: Ctrl+B or /slots.",
+		shortSessionID(displaced)))
 	return m, m.setFlash("Attached")
 }
 
@@ -381,37 +504,38 @@ func (m *model) replayAgentEvent(msg agentMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleSlotEnvelope delivers an event read from a run channel. The envelope
-// names the channel; the channel names the run. The background slot's
-// events buffer (deltas render only for the active slot); the active run's
-// go through the ordinary handlers; anything else is an orphan reader on a
-// channel neither run owns anymore — canceled and drained — and dies
-// without a re-arm.
+// names the channel; slotByChannel matches it against the registry — with N
+// slots each channel still names exactly one run. The matched slot's events
+// buffer (deltas render only for the active slot); the active run's go
+// through the ordinary handlers; anything else is an orphan reader on a
+// channel neither the registry nor the active slot owns anymore — canceled
+// and drained — and dies without a re-arm.
 func (m *model) handleSlotEnvelope(env slotEnvelope) (tea.Model, tea.Cmd) {
-	if m.bg != nil && env.ch == m.bg.ch {
-		if m.bg.done {
+	if s := m.slotByChannel(env.ch); s != nil {
+		if s.done {
 			// Finalized synthetically (cancel while detached): the loop is
 			// dying and dribbles into a channel nobody replays anymore.
 			// Swallow without re-arm — the parked reader exits at the close
 			// and the late events die in the channel buffer. A loop deaf to
 			// its context never reaches that close: its reader stays parked,
 			// one goroutine per cancel, bounded by the channel buffer — a
-			// debt cancelBackgroundRun accepts by finalizing synthetically.
+			// debt cancelBackgroundSlot accepts by finalizing synthetically.
 			return m, nil
 		}
 		if env.ev == nil {
 			// The slot's channel closed while detached: the real done.
-			return m.finishSlotRun(m.bg, agentDoneMsg{})
+			return m.finishSlotRun(s, agentDoneMsg{})
 		}
 		if done, ok := env.ev.(agentDoneMsg); ok {
-			return m.finishSlotRun(m.bg, done)
+			return m.finishSlotRun(s, done)
 		}
-		m.bg.record(env.ev)
+		s.record(env.ev)
 		// Subagent events are NOT handled here — they never ride a run
 		// channel (waitForSubEvent delivers them raw from AgentEventCh,
 		// and updateAgentStream routes them to the monitor before this
 		// code runs). Re-arming waitForSubEvent from an envelope would
 		// park a second reader on AgentEventCh and freeze the monitor.
-		return m, waitForSlotAgent(m.bg.ch)
+		return m, waitForSlotAgent(s.ch)
 	}
 	if env.ch == m.agentCh {
 		if env.ev == nil {
@@ -517,79 +641,115 @@ func (m *model) startSlotInbox(bg *backgroundRun) tea.Cmd {
 	return waitForSlotAgent(ch)
 }
 
-// cancelBackgroundRun stops a detached run the way Esc cancels a foreground
-// one. The loop's context is canceled, stashed input requests are denied by
-// finishSlotRun, and the run finalizes synthetically: a real done would have
-// to outrun the slot's own queue, and a loop wedged on a context-deaf call
-// would never deliver one. Late events from the dying loop arrive in
-// envelopes and die in handleSlotEnvelope. cancelAgent's drain goroutine is
-// deliberately not used — a second reader on the channel would race the
-// parked one.
-func (m *model) cancelBackgroundRun() tea.Cmd {
-	if m.bg == nil {
+// cancelBackgroundSlot stops a slot's detached run the way Esc cancels a
+// foreground one. The loop's context is canceled, stashed input requests are
+// denied by finishSlotRun, and the run finalizes synthetically: a real done
+// would have to outrun the slot's own queue, and a loop wedged on a
+// context-deaf call would never deliver one. Late events from the dying loop
+// arrive in envelopes and die in handleSlotEnvelope. cancelAgent's drain
+// goroutine is deliberately not used — a second reader on the channel would
+// race the parked one.
+func (m *model) cancelBackgroundSlot(bg *backgroundRun) tea.Cmd {
+	if bg == nil || bg.done {
 		return nil
 	}
-	if m.bg.cancel != nil {
-		m.bg.cancel()
-		m.bg.cancel = nil
+	if bg.cancel != nil {
+		bg.cancel()
+		bg.cancel = nil
 	}
 	m.escCancelCount = 0
-	_, cmd := m.finishSlotRun(m.bg, agentDoneMsg{err: context.Canceled})
+	_, cmd := m.finishSlotRun(bg, agentDoneMsg{err: context.Canceled})
 	return cmd
 }
 
+// cancelAllBackgroundSlots stops every live slot — the Ctrl+C quit path:
+// nothing survives into quit with a loop still writing.
+func (m *model) cancelAllBackgroundSlots() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, s := range m.liveSlots() {
+		if c := m.cancelBackgroundSlot(s); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
 // handleBackgroundApproval stashes a permission request that arrived from
-// the background session. The dialog is the foreground UI; detached, the
+// the named slot's session. The dialog is the foreground UI; detached, the
 // loop blocked on the request gets a notice and attention instead, and the
 // dialog opens on attach. Re-arms the channel reader — exactly one, always.
-func (m *model) handleBackgroundApproval(msg approvalRequestMsg) (tea.Model, tea.Cmd) {
-	if m.bg.approval != nil {
+func (m *model) handleBackgroundApproval(bg *backgroundRun, msg approvalRequestMsg) (tea.Model, tea.Cmd) {
+	if bg.approval != nil {
 		// Requests are sequential inside the loop: a second one means the
 		// first was abandoned. Fail it closed, like the foreground dialog.
-		m.bg.approval.Reply <- permission.ApprovalResult{}
+		bg.approval.Reply <- permission.ApprovalResult{}
 	}
 	req := msg.sa.Req
-	m.bg.approval = &req
-	m.chatModel.AppendNotice("Background run needs your input — Ctrl+B to attach: approval " + req.Tool)
+	bg.approval = &req
+	m.chatModel.AppendNotice(fmt.Sprintf(
+		"Background session %s needs your input — Ctrl+B or /slots to attach: approval %s",
+		shortSessionID(bg.sessionID), req.Tool))
 	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Approval required: "+req.Tool),
 		waitForApproval(m.cfg.ApprovalCh))
 }
 
 // handleBackgroundQuestion is the question tool's twin of
 // handleBackgroundApproval.
-func (m *model) handleBackgroundQuestion(msg questionRequestMsg) (tea.Model, tea.Cmd) {
-	if m.bg.question != nil {
-		m.bg.question.Reply <- tools.QuestionAnswer{Selected: "canceled"}
+func (m *model) handleBackgroundQuestion(bg *backgroundRun, msg questionRequestMsg) (tea.Model, tea.Cmd) {
+	if bg.question != nil {
+		bg.question.Reply <- tools.QuestionAnswer{Selected: "canceled"}
 	}
 	req := msg.sq.Req
-	m.bg.question = &req
-	m.chatModel.AppendNotice("Background run needs your input — Ctrl+B to attach: " + truncateLabel(req.Question, 60))
+	bg.question = &req
+	m.chatModel.AppendNotice(fmt.Sprintf(
+		"Background session %s needs your input — Ctrl+B or /slots to attach: %s",
+		shortSessionID(bg.sessionID), truncateLabel(req.Question, 60)))
 	return m, tea.Batch(m.attentionCmd("☠ Pi-rate", "Question: "+truncateLabel(req.Question, 60)),
 		waitForQuestion(m.cfg.QuestionCh))
 }
 
-// BackgroundStatus is the detached run's slice of the status bar input.
+// BackgroundStatus is one slot's slice of the registry views (popup row).
 type BackgroundStatus struct {
 	Elapsed time.Duration
 	Events  int
 	Dropped int
 	Done    bool
+	Parked  bool // no run of its own (a /new parking, an attach's displaced session)
+	Await   bool // holds a stashed approval/question — the ⚑ badge
 }
 
-// backgroundStatus snapshots the detached run for the status bar. nil when
+// Idle reports whether the slot has nothing running and nothing to review:
+// a parked session waiting only for its attach.
+func (s *BackgroundStatus) Idle() bool { return s.Parked || (s.Done && s.Events == 0) }
+
+// BackgroundSummary aggregates the slot registry for the status bar: the
+// count answers "how much runs in the background", Awaiting is the ⚑ badge
+// for slots holding a stashed input request. nil when the registry is empty.
+type BackgroundSummary struct {
+	Slots    int // registry size, any state
+	Live     int // slots with a live loop
+	Awaiting int // slots holding a stashed approval/question
+	Events   int // buffered events across slots
+}
+
+// backgroundSummary snapshots the registry for the status bar. nil when
 // nothing is backgrounded.
-func (m *model) backgroundStatus() *BackgroundStatus {
-	if m.bg == nil {
+func (m *model) backgroundSummary() *BackgroundSummary {
+	if len(m.slots) == 0 {
 		return nil
 	}
-	elapsed := time.Since(m.bg.started)
-	if m.bg.done {
-		elapsed = m.bg.finished.Sub(m.bg.started)
+	sum := &BackgroundSummary{Slots: len(m.slots)}
+	for _, s := range m.slots {
+		if !s.done {
+			sum.Live++
+		}
+		if s.approval != nil || s.question != nil {
+			sum.Awaiting++
+		}
+		sum.Events += s.seen
 	}
-	return &BackgroundStatus{
-		Elapsed: elapsed,
-		Events:  m.bg.seen,
-		Dropped: m.bg.dropped,
-		Done:    m.bg.done,
-	}
+	return sum
 }

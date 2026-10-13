@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,16 +23,19 @@ import (
 	"github.com/spa-skyson/pi-rate/internal/tools"
 )
 
-// The Ctrl+B fork-on-detach state machine (issue #74, MR1): running → detach
-// → attach → done. Detach moves the running session WHOLE into a background
-// slot — its agent, its transcript, its inbox, its channel — and the factory
-// opens a fresh session in the active slot. The per-slot invariant under test:
-// a slot's run never writes to the OTHER slot's state, so a prompt typed to
-// the fresh session starts immediately (the complaint the issue closes), and
-// a background finish mid-active-turn leaves the active turn alone.
-// The channel-ownership rule is unchanged from v1: the parked
-// waitForSlotAgent command stays the only reader on each run channel through
-// detach and attach; routing, never a second goroutine.
+// The Ctrl+B fork-on-detach state machine over the session registry (issue
+// #74, MR2): running → detach → slot; every detach adds one slot, so N
+// background sessions come from N sequential run+detach cycles. Attach swaps
+// a slot's session with the active one, parking the displaced session back
+// into the registry — switching never loses a session. The per-slot
+// invariant under test: a slot's run never writes to ANOTHER slot's state or
+// to the active slot, so a prompt typed to the fresh session starts
+// immediately (the complaint the issue closes) and a background finish
+// mid-active-turn leaves the active turn alone.
+// The channel-ownership rule is unchanged: each run channel keeps exactly
+// one parked reader through detach and attach; slotEnvelope names the
+// channel, and the channel names the slot — routing, never a second
+// goroutine.
 
 // twoTextLLM streams two text deltas per model call, so a real runAgentLoop
 // emits two agentTextMsg events per turn — enough to detach between them.
@@ -70,24 +74,31 @@ func (l *gatedLLM) GenerateContent(_ context.Context, _ *llmmodel.LLMRequest, _ 
 
 // heldLLM blocks every model call until release closes — a run stays alive
 // with nothing on its channel, so a test can detach and then act on the
-// active session while the slot runs.
+// active session while the slot runs. Safe for several loops on one
+// instance: the mutex only guards the call counter, the gate is shared.
 type heldLLM struct {
 	name    string
+	mu      sync.Mutex
+	calls   int
 	release chan struct{}
 }
 
 func (l *heldLLM) Name() string { return l.name }
 
 func (l *heldLLM) GenerateContent(_ context.Context, _ *llmmodel.LLMRequest, _ bool) iter.Seq2[*llmmodel.LLMResponse, error] {
+	l.mu.Lock()
+	l.calls++
+	l.mu.Unlock()
 	return func(yield func(*llmmodel.LLMResponse, error) bool) {
 		<-l.release
 		yield(textResp("done"), nil)
 	}
 }
 
-// bgFactory is the stub session factory detach forks through: a fresh real
-// agent (same llm) and a fresh session id per call, the shape
-// newSessionAgent in the CLI produces. Only Update calls it — single-threaded.
+// bgFactory is the stub session factory detach and /new fork through: a
+// fresh real agent (same llm) and a fresh session id per call, the shape
+// newSessionAgent in the CLI produces. Only Update calls it —
+// single-threaded.
 type bgFactory struct {
 	t      *testing.T
 	llm    llmmodel.LLM
@@ -101,7 +112,7 @@ func (f *bgFactory) New(_ context.Context, _ llmmodel.LLM) (*agent.Agent, string
 }
 
 // newBgTestModel builds a model wired to a real agent over llm, with the
-// session factory set — the minimum detachRun needs to fork.
+// session factory set — the minimum detachRun and /new need to fork.
 func newBgTestModel(t *testing.T, llm llmmodel.LLM) *model {
 	t.Helper()
 	a, sid := newRunTestAgent(t, llm)
@@ -115,8 +126,8 @@ func newBgTestModel(t *testing.T, llm llmmodel.LLM) *model {
 }
 
 // newPersistedTestAgent builds a real Agent whose sessions persist through
-// svc — the events.jsonl assertions need a FileService both the starting
-// session and the forked one are registered in.
+// svc — the events.jsonl assertions need a FileService every session (the
+// starting one and every forked one) is registered in.
 func newPersistedTestAgent(t *testing.T, llm llmmodel.LLM, svc *pisession.FileService) *agent.Agent {
 	t.Helper()
 	sb, err := tools.NewSandbox(t.TempDir())
@@ -159,7 +170,7 @@ func noticesText(m *model) string {
 	return b.String()
 }
 
-// slotNotices joins the notices of the slot's own transcript — the slot's
+// slotNotices joins the notices of a slot's own transcript — the slot's
 // close-out lines live there, not in the active one.
 func slotNotices(bg *backgroundRun) string {
 	var b strings.Builder
@@ -169,6 +180,15 @@ func slotNotices(bg *backgroundRun) string {
 		}
 	}
 	return b.String()
+}
+
+// slotByID finds a registry slot by session id in tests — the same lookup
+// production routing does, kept explicit so a test names what it drives.
+func slotByID(m *model, sid string) *backgroundRun {
+	if s := m.slotBySession(sid); s != nil {
+		return s
+	}
+	return nil
 }
 
 // ctrlB is the background hotkey as the terminal delivers it.
@@ -203,6 +223,17 @@ func waitForCond(t *testing.T, d time.Duration, what string, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition not met in time: " + what)
+}
+
+// firstEnvelope reads the first envelope from a parked reader.
+func firstEnvelope(t *testing.T, cmd tea.Cmd) slotEnvelope {
+	t.Helper()
+	msg := cmd()
+	env, ok := msg.(slotEnvelope)
+	if !ok {
+		t.Fatalf("reader delivered %T, want slotEnvelope", msg)
+	}
+	return env
 }
 
 // drainRun pumps a run channel to its close, so a released gate cannot leave
@@ -259,9 +290,10 @@ func TestBackground_RunConfigIsSnapshotted(t *testing.T) {
 }
 
 // TestBackground_DetachForksFreshSession walks the core cycle over a real
-// agent: detach mid-stream moves the session whole into the slot and opens a
-// fresh one; attach hands the slot back with the run still alive; the rest
-// of the turn then renders in the foreground exactly once.
+// agent: detach mid-stream moves the session whole into a slot and opens a
+// fresh one; attach hands the slot back with the run still alive and parks
+// the displaced session in the registry; the rest of the turn then renders
+// in the foreground exactly once.
 func TestBackground_DetachForksFreshSession(t *testing.T) {
 	gate := make(chan struct{})
 	m := newBgTestModel(t, &gatedLLM{name: "fork", gate: gate})
@@ -294,13 +326,14 @@ func TestBackground_DetachForksFreshSession(t *testing.T) {
 	if m.todoState != nil {
 		t.Fatal("the fresh session shows the departed session's todo plan")
 	}
-	if m.bg == nil {
-		t.Fatal("detach did not arm the background slot")
+	if len(m.slots) != 1 {
+		t.Fatalf("registry holds %d slots after one detach, want 1", len(m.slots))
 	}
 	if tick == nil {
 		t.Fatal("detach did not arm the status tick")
 	}
-	if m.bg.sessionID != origSID || m.bg.agent != origAgent {
+	slot := m.slots[0]
+	if slot.sessionID != origSID || slot.agent != origAgent {
 		t.Fatal("the slot did not take over the original session and agent")
 	}
 	if m.cfg.SessionID == origSID || m.cfg.Agent == origAgent {
@@ -311,25 +344,29 @@ func TestBackground_DetachForksFreshSession(t *testing.T) {
 			t.Fatalf("the fresh session inherited transcript content: %q", msg.content)
 		}
 	}
-	if len(m.bg.messages) == 0 {
+	if len(slot.messages) == 0 {
 		t.Fatal("the slot lost the original transcript")
 	}
 	if !strings.Contains(noticesText(m), "Session forked") {
 		t.Fatal("the fork notice is missing")
 	}
 
-	// Ctrl+B again: attach returns the LIVE slot — running, its channel
-	// parked as the active one.
+	// Ctrl+B again with one slot: attach returns the LIVE run — running,
+	// its channel parked as the active one — and the displaced fresh
+	// session stays in the registry.
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg != nil {
-		t.Fatal("attach left the background slot armed")
-	}
 	if !m.running {
 		t.Fatal("attach did not return the live run to the foreground")
 	}
 	if m.cfg.SessionID != origSID {
 		t.Fatal("attach did not restore the slot's session id")
+	}
+	if len(m.slots) != 1 {
+		t.Fatalf("registry holds %d slots after attach, want the parked displaced one", len(m.slots))
+	}
+	if m.slots[0].sessionID == origSID || !m.slots[0].done || m.slots[0].ch != nil {
+		t.Fatal("the displaced fresh session was not parked idle in the registry")
 	}
 
 	// Release the gate: the rest of the turn renders live, exactly once.
@@ -366,17 +403,6 @@ func TestBackground_DetachForksFreshSession(t *testing.T) {
 	}
 }
 
-// firstEnvelope reads the first envelope from a parked reader.
-func firstEnvelope(t *testing.T, cmd tea.Cmd) slotEnvelope {
-	t.Helper()
-	msg := cmd()
-	env, ok := msg.(slotEnvelope)
-	if !ok {
-		t.Fatalf("reader delivered %T, want slotEnvelope", msg)
-	}
-	return env
-}
-
 // TestBackground_DetachedFinishReplaysOnAttach drives a run to completion
 // while detached, then attaches: the buffer replays structurally and the
 // finished slot releases the input without inventing a run.
@@ -396,7 +422,8 @@ func TestBackground_DetachedFinishReplaysOnAttach(t *testing.T) {
 	_, cmd = m.Update(env)
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg == nil || m.bg.done {
+	slot := m.slots[0]
+	if slot == nil || slot.done {
 		t.Fatal("detach failed mid-turn")
 	}
 
@@ -420,7 +447,7 @@ func TestBackground_DetachedFinishReplaysOnAttach(t *testing.T) {
 	if !sawTwo {
 		t.Fatal("the second delta never arrived detached")
 	}
-	if m.bg == nil || !m.bg.done {
+	if slot.done != true {
 		t.Fatal("the detached run did not finalize on close")
 	}
 	if strings.Contains(transcriptText(m), "part two") {
@@ -431,18 +458,19 @@ func TestBackground_DetachedFinishReplaysOnAttach(t *testing.T) {
 	if strings.Contains(noticesText(m), "Background session") {
 		t.Fatal("the slot finish notice leaked into the active transcript")
 	}
-	if !strings.Contains(slotNotices(m.bg), "Background session") {
+	if !strings.Contains(slotNotices(slot), "Background session") {
 		t.Fatal("the slot finish notice did not land in the slot's transcript")
 	}
 
-	// Attach after the fact: faithful replay, input idle again.
+	// Attach after the fact: faithful replay, input idle again. The
+	// displaced fresh session parks back into the registry.
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg != nil {
-		t.Fatal("attach after finish left the background slot armed")
-	}
 	if m.running {
 		t.Fatal("attaching a finished run marked the model as running")
+	}
+	if len(m.slots) != 1 {
+		t.Fatalf("registry holds %d slots after attach, want the parked displaced one", len(m.slots))
 	}
 	body := transcriptText(m)
 	if !strings.Contains(body, "part one") || !strings.Contains(body, "part two") {
@@ -451,8 +479,128 @@ func TestBackground_DetachedFinishReplaysOnAttach(t *testing.T) {
 	if strings.Count(body, "part two") != 1 {
 		t.Fatalf("replay duplicated the buffered delta: %q", body)
 	}
+	// The finish notice came back with the slot's transcript.
+	if !strings.Contains(noticesText(m), "Background session") {
+		t.Fatal("the slot finish notice did not come back with the attach")
+	}
 	if !strings.Contains(noticesText(m), "Attached") {
 		t.Fatal("the attach notice is missing")
+	}
+}
+
+// TestBackground_ThreeSlotsLiveParallel is the MR2 core: three sequential
+// run+detach cycles leave three slots running in parallel, each persisting
+// to ITS OWN events.jsonl, none bleeding into another. Attach walks across
+// all three.
+func TestBackground_ThreeSlotsLiveParallel(t *testing.T) {
+	dir := t.TempDir()
+	svc, err := pisession.NewFileService(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var closeOnce sync.Once
+	closeRelease := func() { closeOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease) // the happy path closes early; the cleanup covers failures
+	llm := &heldLLM{name: "parallel", release: release}
+
+	a1 := newPersistedTestAgent(t, llm, svc)
+	sid1, _, err := a1.CreateSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModel(t)
+	m.cfg.Agent = a1
+	m.cfg.SessionID = sid1
+	m.cfg.LLM = llm
+	m.cfg.SessionService = svc
+	m.cfg.NewSessionAgent = func(ctx context.Context, _ llmmodel.LLM) (*agent.Agent, string, string, error) {
+		ag := newPersistedTestAgent(t, llm, svc)
+		freshSID, title, err := ag.CreateSessionWithID(ctx, pisession.GenerateSessionID())
+		return ag, freshSID, title, err
+	}
+
+	// Three run+detach cycles: each active session starts a turn on the
+	// blocking LLM, then Ctrl+B detaches it into its own slot.
+	m.beginTurn()
+	_ = m.startAgentLoop("task one")
+	sids := []string{sid1}
+	for cycle := 0; cycle < 3; cycle++ {
+		newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+		m = newM.(*model)
+		if m.running {
+			t.Fatalf("cycle %d: detach left the model running", cycle)
+		}
+		if len(m.slots) != cycle+1 {
+			t.Fatalf("cycle %d: registry holds %d slots, want %d", cycle, len(m.slots), cycle+1)
+		}
+		sids = append(sids, m.cfg.SessionID)
+		if cycle < 2 {
+			// Start the next cycle's run in the fresh active session.
+			m.beginTurn()
+			_ = m.startAgentLoop(fmt.Sprintf("task %d", cycle+2))
+			if !m.running {
+				t.Fatalf("cycle %d: the next run did not start", cycle)
+			}
+		}
+	}
+	if len(m.slots) != 3 {
+		t.Fatalf("registry holds %d slots, want 3", len(m.slots))
+	}
+	for i, s := range m.slots {
+		if s.done {
+			t.Fatalf("slot %d (%s) is not live", i, s.sessionID)
+		}
+	}
+
+	// Release everything: each slot's loop completes and persists its turn
+	// into its own events.jsonl. The parked envelope readers the loops were
+	// armed with were dropped by the test on purpose — drain each slot's
+	// channel the way Update would, so the closes finalize their slots.
+	closeRelease()
+	for _, s := range m.slots {
+		for ev := range s.ch {
+			m.Update(slotEnvelope{ch: s.ch, ev: ev})
+		}
+		m.Update(slotEnvelope{ch: s.ch, ev: nil}) // the close: the real done
+	}
+	for i, s := range m.slots {
+		if !s.done {
+			t.Fatalf("slot %d did not finalize after its channel closed", i)
+		}
+	}
+	for _, s := range m.slots {
+		eventsPath := filepath.Join(dir, s.sessionID, "events.jsonl")
+		waitForCond(t, 5*time.Second, "events.jsonl of "+s.sessionID+" to appear", func() bool {
+			st, err := os.Stat(eventsPath)
+			return err == nil && st.Size() > 0
+		})
+	}
+	// The active session started no turn: its file stays empty.
+	freshPath := filepath.Join(dir, m.cfg.SessionID, "events.jsonl")
+	if st, err := os.Stat(freshPath); err == nil && st.Size() > 0 {
+		t.Fatalf("the idle active session's events.jsonl grew: %d bytes", st.Size())
+	}
+
+	// Attach walks across all three, parking the displaced each time.
+	attached := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		target := m.slots[0].sessionID
+		if attached[target] {
+			target = m.slots[1].sessionID
+		}
+		model2, _ := m.attachBackground(slotByID(m, target))
+		m = model2.(*model)
+		if m.cfg.SessionID != target {
+			t.Fatalf("attach %d: active session = %s, want %s", i, m.cfg.SessionID, target)
+		}
+		if m.running {
+			t.Fatalf("attach %d: a finished slot came back running", i)
+		}
+		attached[target] = true
+	}
+	if len(m.slots) != 3 {
+		t.Fatalf("registry holds %d slots after three attaches, want 3 (each attach parks the displaced)", len(m.slots))
 	}
 }
 
@@ -468,7 +616,7 @@ func TestBackground_DetachedPromptStartsImmediately(t *testing.T) {
 
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	bgSID := m.bg.sessionID
+	bgSID := m.slots[0].sessionID
 
 	// A prompt typed while detached starts on the fresh session at once.
 	model2, _, _ := m.handleInputSubmit(InputSubmitMsg{Text: "fresh question"})
@@ -524,8 +672,8 @@ func TestBackground_BackgroundSessionWritesEventsAfterDetach(t *testing.T) {
 	m.cfg.SessionService = svc
 	m.cfg.NewSessionAgent = func(ctx context.Context, _ llmmodel.LLM) (*agent.Agent, string, string, error) {
 		ag := newPersistedTestAgent(t, llm, svc)
-		freshSID, title, err := ag.CreateSessionWithID(ctx, pisession.GenerateSessionID())
-		return ag, freshSID, title, err
+		freshSID, title, ferr := ag.CreateSessionWithID(ctx, pisession.GenerateSessionID())
+		return ag, freshSID, title, ferr
 	}
 
 	m.beginTurn()
@@ -565,15 +713,22 @@ func TestBackground_BackgroundSessionWritesEventsAfterDetach(t *testing.T) {
 
 // TestBackground_AttachRefusesWhileActiveRuns: the swap needs an idle active
 // session — attaching over a running turn would clobber it mid-flight.
+// Ctrl+B itself detaches, so the refusal is reached through attachBackground
+// directly here; the popup path carries the same guard and is pinned with
+// the popup.
 func TestBackground_AttachRefusesWhileActiveRuns(t *testing.T) {
 	m := newTestModel(t)
 	m.running = true
-	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
+	activeSID := m.cfg.SessionID
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "sess-bg"})
 
-	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
-	m = newM.(*model)
-	if m.bg == nil {
-		t.Fatal("attach over a running turn displaced the slot")
+	mdl, _ := m.attachBackground(m.slots[0])
+	m = mdl.(*model)
+	if m.cfg.SessionID != activeSID {
+		t.Fatal("the refused attach changed the active session")
+	}
+	if len(m.slots) != 1 || m.slots[0].sessionID != "sess-bg" {
+		t.Fatal("the refused attach displaced the slot")
 	}
 	if !strings.Contains(m.flash, "active session is running") {
 		t.Fatalf("flash = %q, want the busy-active refusal", m.flash)
@@ -591,7 +746,7 @@ func TestBackground_PlanCannotDetach(t *testing.T) {
 
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg != nil {
+	if len(m.slots) != 0 {
 		t.Fatal("a plan session was backgrounded")
 	}
 	if !strings.Contains(m.flash, "Plan sessions cannot be backgrounded") {
@@ -608,30 +763,31 @@ func TestBackground_ApprovalDetachedStashOpensOnAttach(t *testing.T) {
 	_ = m.startAgentLoop("long task")
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
+	slot := m.slots[0]
 
 	approvalCh := make(chan SessionApproval, 4)
 	m.cfg.ApprovalCh = approvalCh
-	m.bg.sessionID = "sess-bg"
+	slot.sessionID = "sess-bg"
 	req := permission.ApprovalRequest{Tool: "bash", Command: "rm -rf /", Reply: make(chan permission.ApprovalResult, 1)}
 
 	m.Update(approvalRequestMsg{sa: SessionApproval{Req: req, SessionID: "sess-bg"}})
 	if m.approval != nil {
 		t.Fatal("the approval dialog opened while the run was detached")
 	}
-	if m.bg == nil || m.bg.approval == nil {
+	if slot.approval == nil {
 		t.Fatal("the request was not stashed for attach")
 	}
-	if !strings.Contains(noticesText(m), "Background run needs your input") {
+	if !strings.Contains(noticesText(m), "needs your input") {
 		t.Fatal("the needs-input notice is missing")
 	}
 
-	// Attach: the dialog opens from the stash.
+	// Attach: the dialog opens from the stash, the slot parks empty.
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
 	if m.approval == nil || m.approval.Tool != "bash" {
 		t.Fatalf("attach did not open the stashed dialog: %+v", m.approval)
 	}
-	if m.bg != nil && m.bg.approval != nil {
+	if m.slots[0].approval != nil {
 		t.Fatal("the stash survived attach")
 	}
 }
@@ -644,10 +800,11 @@ func TestBackground_QuestionDetachedStashOpensOnAttach(t *testing.T) {
 	_ = m.startAgentLoop("long task")
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
+	slot := m.slots[0]
 
 	questionCh := make(chan SessionQuestion, 4)
 	m.cfg.QuestionCh = questionCh
-	m.bg.sessionID = "sess-bg"
+	slot.sessionID = "sess-bg"
 	req := tools.QuestionRequest{
 		Question: "Proceed?",
 		Options:  []tools.QuestionOption{{Label: "yes"}, {Label: "no"}},
@@ -658,7 +815,7 @@ func TestBackground_QuestionDetachedStashOpensOnAttach(t *testing.T) {
 	if m.question != nil {
 		t.Fatal("the question dialog opened while the run was detached")
 	}
-	if m.bg == nil || m.bg.question == nil {
+	if slot.question == nil {
 		t.Fatal("the question was not stashed for attach")
 	}
 
@@ -697,16 +854,17 @@ func TestBackground_TwoRunsApprovalsRouteByTag(t *testing.T) {
 	bgReply := make(chan permission.ApprovalResult, 1)
 	activeReply := make(chan permission.ApprovalResult, 1)
 	strayReply := make(chan permission.ApprovalResult, 1)
+	bgSlot := m.slots[0]
 
 	// 1. Background-tagged: stashes behind a notice, dialog stays closed.
 	m.Update(approvalRequestMsg{sa: SessionApproval{
 		Req:       permission.ApprovalRequest{Tool: "bg-tool", Reply: bgReply},
-		SessionID: m.bg.sessionID,
+		SessionID: bgSlot.sessionID,
 	}})
 	if m.approval != nil {
 		t.Fatal("a background-tagged request opened the active dialog")
 	}
-	if m.bg == nil || m.bg.approval == nil || m.bg.approval.Tool != "bg-tool" {
+	if bgSlot.approval == nil || bgSlot.approval.Tool != "bg-tool" {
 		t.Fatal("the background-tagged request was not stashed")
 	}
 
@@ -735,7 +893,7 @@ func TestBackground_TwoRunsApprovalsRouteByTag(t *testing.T) {
 		t.Fatal("the untagged request displaced the active dialog")
 	}
 
-	// 4. Unknown tag (a dead slot's late arrival): denied too.
+	// 4. Unknown tag (a dead session's late arrival): denied too.
 	m.Update(approvalRequestMsg{sa: SessionApproval{
 		Req:       permission.ApprovalRequest{Tool: "stray", Reply: strayReply},
 		SessionID: "sess-gone",
@@ -753,7 +911,7 @@ func TestBackground_TwoRunsApprovalsRouteByTag(t *testing.T) {
 	// stashed request — a dead run must not leave a loop waiting forever.
 	close(release)
 	drainRun(t, m, activeCmd)
-	m.Update(slotEnvelope{ch: m.bg.ch, ev: nil}) // the slot's real close
+	m.Update(slotEnvelope{ch: bgSlot.ch, ev: nil}) // the slot's real close
 	select {
 	case res := <-bgReply:
 		if res.Allowed {
@@ -784,9 +942,10 @@ func TestBackground_FinishMidActiveRunSparesActiveSlot(t *testing.T) {
 	}
 	// The one reader the runtime would have parked (see the TwoRuns test).
 	activeCmd := waitForSlotAgent(m.agentCh)
+	slot := m.slots[0]
 
 	// The background run dies mid-active-turn.
-	m.Update(slotEnvelope{ch: m.bg.ch, ev: nil})
+	m.Update(slotEnvelope{ch: slot.ch, ev: nil})
 
 	if !m.running {
 		t.Fatal("the background finish clobbered the active turn's running flag")
@@ -797,12 +956,12 @@ func TestBackground_FinishMidActiveRunSparesActiveSlot(t *testing.T) {
 	if m.agentCh != activeCh {
 		t.Fatal("the background finish displaced the active run's channel")
 	}
-	if m.bg == nil || !m.bg.done {
+	if !slot.done {
 		t.Fatal("the background run was not finalized")
 	}
 	// The close-out notice belongs to the slot's transcript; the active
 	// one stays clean.
-	if !strings.Contains(slotNotices(m.bg), "Background session") {
+	if !strings.Contains(slotNotices(slot), "Background session") {
 		t.Fatal("the finish notice did not land in the slot's transcript")
 	}
 	if strings.Contains(noticesText(m), "Background session") {
@@ -817,10 +976,11 @@ func TestBackground_FinishMidActiveRunSparesActiveSlot(t *testing.T) {
 	drainRun(t, m, activeCmd)
 }
 
-// TestBackground_EscEscCancelsBackgroundRun: Esc-Esc cancels the slot's run
-// through its own cancel func — the run finalizes synthetically, a stashed
-// approval is denied, and the slot restarts ITS OWN inbox. The active slot
-// stays idle: the queue is the slot's, not the global one.
+// TestBackground_EscEscCancelsBackgroundRun: Esc-Esc cancels the newest
+// live slot's run through its own cancel func — the run finalizes
+// synthetically, a stashed approval is denied, and the slot restarts ITS OWN
+// inbox. The active slot stays idle: the queue is the slot's, not the global
+// one.
 func TestBackground_EscEscCancelsBackgroundRun(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
@@ -831,12 +991,13 @@ func TestBackground_EscEscCancelsBackgroundRun(t *testing.T) {
 	m = newM.(*model)
 
 	// A stashed approval and a queued prompt wait on the slot's run.
-	slotAgent, slotSID := m.bg.agent, m.bg.sessionID
-	oldCh := m.bg.ch
+	slot := m.slots[0]
+	slotAgent, slotSID := slot.agent, slot.sessionID
+	oldCh := slot.ch
 	canceled := false
-	m.bg.cancel = func() { canceled = true }
-	m.bg.approval = &permission.ApprovalRequest{Tool: "bash", Reply: make(chan permission.ApprovalResult, 1)}
-	m.bg.inbox = []queuedPrompt{{text: "waiting in the slot"}}
+	slot.cancel = func() { canceled = true }
+	slot.approval = &permission.ApprovalRequest{Tool: "bash", Reply: make(chan permission.ApprovalResult, 1)}
+	slot.inbox = []queuedPrompt{{text: "waiting in the slot"}}
 	esc := tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}).Key()
 
 	newM, _, _ = m.handleInterruptKey(esc)
@@ -844,7 +1005,7 @@ func TestBackground_EscEscCancelsBackgroundRun(t *testing.T) {
 	if m.escCancelCount != 1 {
 		t.Fatalf("first Esc: escCancelCount = %d, want 1", m.escCancelCount)
 	}
-	if m.bg == nil || m.bg.done {
+	if slot.done {
 		t.Fatal("the first Esc canceled the run outright")
 	}
 
@@ -853,25 +1014,103 @@ func TestBackground_EscEscCancelsBackgroundRun(t *testing.T) {
 	if !canceled {
 		t.Fatal("Esc-Esc did not call the slot's cancel func")
 	}
-	if m.bg == nil || m.bg.done {
-		t.Fatal("Esc-Esc did not finalize the background run")
+	// The synthetic finalization happened — the stash died denied, the old
+	// channel was replaced — and the slot's own inbox restarted, which
+	// flips done back to false: the slot is busy with ITS conversation
+	// again, that is the restart's signature, not a missed finalize.
+	if slot.done {
+		t.Fatal("Esc-Esc finalized the slot but its inbox did not restart")
 	}
-	if m.bg.ch == oldCh {
+	if slot.ch == oldCh {
 		t.Fatal("the slot's inbox restart did not give the slot a fresh channel")
 	}
-	if m.bg.agent != slotAgent || m.bg.sessionID != slotSID {
+	if slot.agent != slotAgent || slot.sessionID != slotSID {
 		t.Fatal("the inbox restart left the slot's session")
 	}
-	if len(m.bg.inbox) != 0 {
-		t.Fatalf("the slot still holds %d inbox prompts after the restart", len(m.bg.inbox))
+	if len(slot.inbox) != 0 {
+		t.Fatalf("the slot still holds %d inbox prompts after the restart", len(slot.inbox))
 	}
 	if m.running {
 		t.Fatal("the slot's restart leaked into the active slot's state")
 	}
-	if m.bg.cancel == nil {
+	if slot.cancel == nil {
 		t.Fatal("the restarted slot run has no cancel func")
 	}
-	m.bg.cancel() // stop the restarted run; release unblocks its model call
+	slot.cancel() // stop the restarted run; release unblocks its model call
+}
+
+// TestBackground_EscEscTargetsNewestLiveSlot: with several slots, Esc-Esc
+// cancels the most recently detached live one — stack discipline — and the
+// older slot keeps running.
+func TestBackground_EscEscTargetsNewestLiveSlot(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	m := newBgTestModel(t, &heldLLM{name: "newest", release: release})
+	m.beginTurn()
+	_ = m.startAgentLoop("task one")
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	first := m.slots[0]
+	m.beginTurn()
+	_ = m.startAgentLoop("task two")
+	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	second := m.slots[1]
+	if first.done || second.done {
+		t.Fatal("both slots must be live before the cancel")
+	}
+
+	esc := tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}).Key()
+	newM, _, _ = m.handleInterruptKey(esc)
+	m = newM.(*model)
+	newM, _, _ = m.handleInterruptKey(esc)
+	m = newM.(*model)
+	if !second.done {
+		t.Fatal("Esc-Esc did not cancel the newest live slot")
+	}
+	if first.done {
+		t.Fatal("Esc-Esc canceled the older slot instead of the newest")
+	}
+	// The registry keeps both: the canceled one stays for review.
+	if len(m.slots) != 2 {
+		t.Fatalf("registry holds %d slots, want 2", len(m.slots))
+	}
+}
+
+// TestBackground_QuitCancelsAllSlots: the first Ctrl+C cancels the active
+// turn AND every live slot at once, warning before the second press quits.
+func TestBackground_QuitCancelsAllSlots(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	m := newBgTestModel(t, &heldLLM{name: "quit", release: release})
+	m.beginTurn()
+	_ = m.startAgentLoop("task one")
+	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	m.beginTurn()
+	_ = m.startAgentLoop("task two")
+	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
+	m = newM.(*model)
+	m.beginTurn()
+	_ = m.startAgentLoop("active turn")
+	if !m.running || len(m.liveSlots()) != 2 {
+		t.Fatalf("setup: running=%v live=%d, want true/2", m.running, len(m.liveSlots()))
+	}
+
+	ctrlC := tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}).Key()
+	newM, _, _ = m.handleInterruptKey(ctrlC)
+	m = newM.(*model)
+	if m.running {
+		t.Fatal("Ctrl+C did not cancel the active turn")
+	}
+	for i, s := range m.slots {
+		if !s.done {
+			t.Fatalf("slot %d survived the quit-cancel", i)
+		}
+	}
+	if m.quitting {
+		t.Fatal("the first Ctrl+C quit instead of warning")
+	}
 }
 
 // TestBackground_LateEventsAfterCancelDie: after a synthetic cancel the dead
@@ -880,21 +1119,21 @@ func TestBackground_EscEscCancelsBackgroundRun(t *testing.T) {
 // subagent monitor keeps its own reader.
 func TestBackground_LateEventsAfterCancelDie(t *testing.T) {
 	m := newTestModel(t)
-	m.agentCh = make(chan agentMsg, 8)
 	bgCh := make(chan agentMsg, 8)
 	subCh := make(chan AgentSubEvent, 8)
 	m.cfg.AgentEventCh = subCh
 	m.beginTurn()
 	m.running = false
-	m.bg = &backgroundRun{started: time.Now(), ch: bgCh}
+	m.addSlot(&backgroundRun{started: time.Now(), ch: bgCh})
+	slot := m.slots[0]
 
 	_, cancelCmd, _ := m.handleInterruptKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}).Key())
 	_, _, _ = m.handleInterruptKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}).Key())
 	_ = cancelCmd
-	if !m.bg.done {
+	if !slot.done {
 		t.Fatal("the cancel did not finalize the run")
 	}
-	noticesAfterCancel := slotNotices(m.bg)
+	noticesAfterCancel := slotNotices(slot)
 
 	// Late events from the dying loop: swallowed, not rendered, not
 	// finalized again.
@@ -903,9 +1142,9 @@ func TestBackground_LateEventsAfterCancelDie(t *testing.T) {
 		t.Fatal("a late event from a canceled run rendered")
 	}
 	m.Update(slotEnvelope{ch: bgCh, ev: nil})
-	if n := strings.Count(slotNotices(m.bg), "Background session"); n != strings.Count(noticesAfterCancel, "Background session") {
+	if n := strings.Count(slotNotices(slot), "Background session"); n != strings.Count(noticesAfterCancel, "Background session") {
 		t.Fatalf("late delivery re-finalized the run: slot notices grew from %d to %d",
-			strings.Count(noticesAfterCancel, "Background session"), strings.Count(slotNotices(m.bg), "Background session"))
+			strings.Count(noticesAfterCancel, "Background session"), strings.Count(slotNotices(slot), "Background session"))
 	}
 	// Subagent events ride the session channel: never swallowed.
 	_, subCmd := m.Update(agentSubEventMsg{agentID: "a", kind: "text", content: "s"})
@@ -914,22 +1153,22 @@ func TestBackground_LateEventsAfterCancelDie(t *testing.T) {
 	}
 }
 
-// TestBackground_CycleWorksWithBackgroundSlot pins the flipped guard: the
+// TestBackground_CycleWorksWithBackgroundSlots pins the flipped guard: a
 // slot freezes ITS OWN agent, so Shift+Tab rebuilds the ACTIVE agent freely
-// while a background run lives. Under the v1 global guard this refused.
-func TestBackground_CycleWorksWithBackgroundSlot(t *testing.T) {
+// while background slots live. Under the v1 global guard this refused.
+func TestBackground_CycleWorksWithBackgroundSlots(t *testing.T) {
 	var asked []string
 	m := newSwitchTestModel(t, &asked)
-	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "sess-bg"})
 
 	shiftTab := (tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}).Key()
 	newM, _, _ := m.handleToggleKey(shiftTab)
 	m = newM.(*model)
 	if m.activeAgent != "build" {
-		t.Fatalf("agent did not cycle under a live background slot: %q", m.activeAgent)
+		t.Fatalf("agent did not cycle under live background slots: %q", m.activeAgent)
 	}
 	if len(asked) != 1 {
-		t.Fatalf("the switcher ran %d times under a live slot, want 1", len(asked))
+		t.Fatalf("the switcher ran %d times under live slots, want 1", len(asked))
 	}
 	if strings.Contains(m.flash, "Background run active") {
 		t.Fatalf("flash = %q, the v1 refusal must be gone", m.flash)
@@ -941,7 +1180,7 @@ func TestBackground_CycleWorksWithBackgroundSlot(t *testing.T) {
 // Under the v1 global guard they were refused.
 func TestBackground_SlashCommandsWorkWithBackgroundSlot(t *testing.T) {
 	m := newBgTestModel(t, &heldLLM{name: "slash", release: make(chan struct{})})
-	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "sess-bg"})
 
 	submitted, _, _ := m.handleInputSubmit(InputSubmitMsg{Text: "/session"})
 	m = submitted.(*model)
@@ -954,13 +1193,13 @@ func TestBackground_SlashCommandsWorkWithBackgroundSlot(t *testing.T) {
 }
 
 // TestBackground_QueuedPromptStartsWithSlotAlive: the prompt queue is the
-// ACTIVE session's inbox; a background slot never blocks it from starting.
+// ACTIVE session's inbox; background slots never block it from starting.
 func TestBackground_QueuedPromptStartsWithSlotAlive(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	m := newBgTestModel(t, &heldLLM{name: "queue", release: release})
 	// Detached state: the input is free (running=false), the slot runs.
-	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "sess-bg"})
 	m.pendingPrompts = []queuedPrompt{{text: "waiting"}}
 
 	started, cmd := m.startNextPrompt()
@@ -1004,7 +1243,8 @@ func TestBackground_PumpRace(t *testing.T) {
 
 	m := newTestModel(t)
 	ch := make(chan agentMsg, 64)
-	m.bg = &backgroundRun{started: time.Now(), ch: ch}
+	m.addSlot(&backgroundRun{started: time.Now(), ch: ch})
+	slot := m.slots[0]
 
 	go func() {
 		for i := 0; i < total; i++ {
@@ -1037,16 +1277,16 @@ func TestBackground_PumpRace(t *testing.T) {
 		seen[text.text]++
 	}
 
-	if m.bg == nil || !m.bg.done {
+	if !slot.done {
 		t.Fatal("the detached run did not finalize")
 	}
-	if m.bg.seen != total {
-		t.Fatalf("seen = %d, want %d", m.bg.seen, total)
+	if slot.seen != total {
+		t.Fatalf("seen = %d, want %d", slot.seen, total)
 	}
-	if m.bg.dropped != total-backgroundBufferCap {
-		t.Fatalf("dropped = %d, want %d", m.bg.dropped, total-backgroundBufferCap)
+	if slot.dropped != total-backgroundBufferCap {
+		t.Fatalf("dropped = %d, want %d", slot.dropped, total-backgroundBufferCap)
 	}
-	for _, ev := range m.bg.buf {
+	for _, ev := range slot.buf {
 		text := ev.(agentTextMsg).text
 		if seen[text] != 1 {
 			t.Fatalf("event %q delivered %d times, want exactly 1", text, seen[text])
@@ -1063,7 +1303,7 @@ func TestBackground_IdleKeyIsAFlash(t *testing.T) {
 	if m.flash != "Nothing to background" {
 		t.Fatalf("flash = %q, want \"Nothing to background\"", m.flash)
 	}
-	if m.bg != nil || m.running {
+	if len(m.slots) != 0 || m.running {
 		t.Fatal("an idle Ctrl+B changed the run state")
 	}
 }
@@ -1079,7 +1319,7 @@ func TestBackground_RunCycleCannotDetach(t *testing.T) {
 	m.run = &runState{phase: "running"}
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg != nil {
+	if len(m.slots) != 0 {
 		t.Fatal("a /run cycle was backgrounded")
 	}
 	if !strings.Contains(m.flash, "/run cycles cannot be backgrounded") {
@@ -1090,40 +1330,65 @@ func TestBackground_RunCycleCannotDetach(t *testing.T) {
 	m.run.phase = "done"
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg == nil {
+	if len(m.slots) != 1 {
 		t.Fatal("detach refused for a terminal /run state")
 	}
-	m.bg.cancel()
+	m.slots[0].cancel()
 }
 
-// TestBackground_StatusFieldRenders: the bar names the detached run while it
-// works and marks it done once it finished unattached; no run, no field.
+// TestBackground_StatusFieldRenders: the bar aggregates the registry — the
+// slot count with buffered events, plus the ⚑ badge for slots waiting for
+// input; empty registry, no field.
 func TestBackground_StatusFieldRenders(t *testing.T) {
 	p := paletteOrDark(Palette{})
 	if got := statusBackgroundField(StatusRenderInput{}, p); got != nil {
 		t.Fatalf("idle status field = %v, want nil", got)
 	}
-	alive := statusBackgroundField(StatusRenderInput{Background: &BackgroundStatus{
-		Elapsed: 2*time.Minute + 13*time.Second, Events: 34,
+	three := statusBackgroundField(StatusRenderInput{Background: &BackgroundSummary{
+		Slots: 3, Live: 2, Events: 34,
 	}}, p)
-	if len(alive) != 1 || !strings.Contains(alive[0], "bg 2m 13s") || !strings.Contains(alive[0], "34 ev") {
-		t.Fatalf("alive field = %v, want elapsed and event count", alive)
+	if len(three) != 1 || !strings.Contains(three[0], "bg 3") || !strings.Contains(three[0], "34 ev") {
+		t.Fatalf("three-slot field = %v, want the slot count and event count", three)
 	}
-	done := statusBackgroundField(StatusRenderInput{Background: &BackgroundStatus{Events: 34, Done: true}}, p)
-	if len(done) != 1 || !strings.Contains(done[0], "✓") || !strings.Contains(done[0], "34 ev") {
-		t.Fatalf("done field = %v, want the done marker and event count", done)
+	waiting := statusBackgroundField(StatusRenderInput{Background: &BackgroundSummary{
+		Slots: 3, Live: 2, Awaiting: 1, Events: 34,
+	}}, p)
+	if len(waiting) != 2 || !strings.Contains(waiting[1], "⚑ 1") {
+		t.Fatalf("waiting field = %v, want the ⚑ badge beside the count", waiting)
 	}
 }
 
-// TestBackground_StatusDoneShowsDropped: a finished run's evicted events are
-// gone for good — the done field carries the count.
-func TestBackground_StatusDoneShowsDropped(t *testing.T) {
-	p := paletteOrDark(Palette{})
-	got := statusBackgroundField(StatusRenderInput{Background: &BackgroundStatus{
-		Events: 34, Dropped: 12, Done: true,
-	}}, p)
-	if len(got) != 1 || !strings.Contains(got[0], "12 dropped") {
-		t.Fatalf("done field = %v, want the dropped count", got)
+// TestBackground_StatusSummaryTracksSlots pins the summary's arithmetic over
+// the registry: one slot finishing (and one waiting) must move Live and
+// Awaiting while Slots holds — the badge the bar renders comes from here.
+func TestBackground_StatusSummaryTracksSlots(t *testing.T) {
+	m := newTestModel(t)
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "s1"})
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "s2"})
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "s3", done: true})
+
+	sum := m.backgroundSummary()
+	if sum == nil || sum.Slots != 3 || sum.Live != 2 {
+		t.Fatalf("summary = %+v, want 3 slots / 2 live", sum)
+	}
+	if sum.Awaiting != 0 {
+		t.Fatalf("summary = %+v, want no awaiting slot yet", sum)
+	}
+
+	// A stashed request turns the ⚑ on; the finish clears it (the stash
+	// dies with the run — the deny needs a buffered Reply to land in).
+	m.slots[2].approval = &permission.ApprovalRequest{Tool: "bash", Reply: make(chan permission.ApprovalResult, 1)}
+	if sum := m.backgroundSummary(); sum.Awaiting != 1 {
+		t.Fatalf("summary = %+v, want 1 awaiting", sum)
+	}
+	slot2 := m.slots[1]
+	m.finishSlotRun(slot2, agentDoneMsg{})
+	if sum := m.backgroundSummary(); sum.Live != 1 || sum.Awaiting != 1 || sum.Slots != 3 {
+		t.Fatalf("summary after one finish = %+v, want 3 slots / 1 live / 1 awaiting", sum)
+	}
+	m.finishSlotRun(m.slots[2], agentDoneMsg{})
+	if sum := m.backgroundSummary(); sum.Awaiting != 0 {
+		t.Fatalf("summary after the waiting slot finished = %+v, want 0 awaiting", sum)
 	}
 }
 
@@ -1134,11 +1399,11 @@ func TestBackground_AttachFailClosesAPriorDialog(t *testing.T) {
 	m := newTestModel(t)
 	oldReply := make(chan permission.ApprovalResult, 1)
 	m.approval = &permission.ApprovalRequest{Tool: "old", Reply: oldReply}
-	m.bg = &backgroundRun{
+	m.addSlot(&backgroundRun{
 		started:   time.Now(),
 		sessionID: "sess-bg",
 		approval:  &permission.ApprovalRequest{Tool: "stashed", Reply: make(chan permission.ApprovalResult, 1)},
-	}
+	})
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
 	if m.approval == nil || m.approval.Tool != "stashed" {
@@ -1162,13 +1427,17 @@ func TestBackground_EnvelopeAfterAttachRendersOrdinary(t *testing.T) {
 	ch := make(chan agentMsg, 8)
 	m.beginTurn()
 	m.running = false
-	m.bg = &backgroundRun{started: time.Now(), ch: ch}
+	m.addSlot(&backgroundRun{started: time.Now(), ch: ch})
 
-	// Attach a live run: the input is busy again, the buffer replays.
+	// Attach a live run: the input is busy again, the buffer replays. The
+	// displaced idle session parks back into the registry.
 	m.chatModel.AppendNotice("detach marker")
 	m.handleKey(tea.KeyPressMsg(ctrlB()))
-	if m.bg != nil || !m.running {
+	if !m.running {
 		t.Fatal("attach of a live run did not return it to the foreground")
+	}
+	if len(m.slots) != 1 {
+		t.Fatalf("registry holds %d slots after attach, want the parked displaced one", len(m.slots))
 	}
 
 	// The pre-attach reader now delivers: rendered, unmarked re-arm.
@@ -1184,10 +1453,10 @@ func TestBackground_EnvelopeAfterAttachRendersOrdinary(t *testing.T) {
 }
 
 // TestBackground_RoutingFollowsTheEnvelopeChannel is the routing proof: the
-// channel an envelope names decides everything. The bg channel's events
-// buffer and re-arm on the bg channel; the active channel's render and
-// re-arm on the active channel; a subagent event — which never rides a run
-// channel — keeps the monitor's reader. Then the bg channel's close
+// channel an envelope names decides everything — now across a registry. The
+// slot's events buffer and re-arm on its channel; the active channel's
+// render and re-arm on the active channel; a subagent event — which never
+// rides a run channel — keeps the monitor's reader. Then the slot's close
 // finalizes exactly once, and the monitor survives the run.
 func TestBackground_RoutingFollowsTheEnvelopeChannel(t *testing.T) {
 	m := newTestModel(t)
@@ -1198,7 +1467,8 @@ func TestBackground_RoutingFollowsTheEnvelopeChannel(t *testing.T) {
 	m.agentCh = activeCh
 	m.beginTurn()
 	m.running = false
-	m.bg = &backgroundRun{started: time.Now(), ch: bgCh}
+	m.addSlot(&backgroundRun{started: time.Now(), ch: bgCh})
+	slot := m.slots[0]
 
 	// One event per channel, delivered detached: the returned commands are
 	// the parked readers.
@@ -1208,8 +1478,8 @@ func TestBackground_RoutingFollowsTheEnvelopeChannel(t *testing.T) {
 	if cmdBg == nil || cmdActive == nil || cmdSub == nil {
 		t.Fatal("the detached routing returned no re-arm")
 	}
-	if m.bg.seen != 1 {
-		t.Fatalf("seen = %d, want 1 — the bg delta must buffer, the active one render", m.bg.seen)
+	if slot.seen != 1 {
+		t.Fatalf("seen = %d, want 1 — the bg delta must buffer, the active one render", slot.seen)
 	}
 	if !strings.Contains(transcriptText(m), "active delta") {
 		t.Fatal("the active delta did not render")
@@ -1254,7 +1524,7 @@ func TestBackground_RoutingFollowsTheEnvelopeChannel(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("finalization returned a command: re-arming a closed channel")
 	}
-	if n := strings.Count(slotNotices(m.bg), "Background session"); n != 1 {
+	if n := strings.Count(slotNotices(slot), "Background session"); n != 1 {
 		t.Fatalf("finalization slot notices = %d, want exactly 1", n)
 	}
 	// The monitor's reader survives the run: it still reads AgentEventCh.
@@ -1265,10 +1535,10 @@ func TestBackground_RoutingFollowsTheEnvelopeChannel(t *testing.T) {
 }
 
 // TestBackground_TripleToggleFreesSlot: detach → attach → detach wraps the
-// same channel in a new backgroundRun, while the reader parked by the first
-// detach still delivers the close. Classified by pointer that close would
-// land in the wrong run; the channel comparison makes it the real done of
-// the run the slot holds now — and the slot's OWN inbox restarts, not the
+// same channel in a new slot, while the reader parked by the first detach
+// still delivers the close. Classified by pointer that close would land in
+// the wrong slot; the channel comparison makes it the real done of the run
+// the registry holds now — and the slot's OWN inbox restarts, not the
 // active session's queue.
 func TestBackground_TripleToggleFreesSlot(t *testing.T) {
 	release := make(chan struct{})
@@ -1281,30 +1551,36 @@ func TestBackground_TripleToggleFreesSlot(t *testing.T) {
 	// 1. Detach, and let one event arm an envelope reader for slot #1.
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	first := m.bg
+	first := m.slots[0]
+	runCh := first.ch // the attach parks the slot channelless — capture now
 	_, cmd1 := m.Update(slotEnvelope{ch: first.ch, ev: agentTextMsg{text: "delta"}})
 	if cmd1 == nil {
 		t.Fatal("no re-arm after the detached event")
 	}
 
-	// 2. Attach: the run is foreground again, the envelope reader stays
-	// parked on the same channel.
+	// 2. Attach: the run is foreground again; the displaced fresh session
+	// parks back — and the same slot struct now wraps the run's channel
+	// for the NEXT detach (the slot is reused in place by the swap).
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg != nil || !m.running {
+	if !m.running {
 		t.Fatal("the intermediate attach did not return the run to the foreground")
 	}
+	if len(m.slots) != 1 {
+		t.Fatalf("registry holds %d slots after attach, want the parked one", len(m.slots))
+	}
 
-	// 3. Detach again: a fresh slot over the SAME channel. The queued
-	// prompt rides along — it belongs to the slot's conversation now.
+	// 3. Detach again: the run moves back into the registry — a new slot
+	// over the SAME channel. The queued prompt rides along — it belongs to
+	// the slot's conversation now.
 	m.pendingPrompts = []queuedPrompt{{text: "queued for the slot"}}
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	second := m.bg
-	if second == nil || second == first {
-		t.Fatal("expected a fresh slot over the same channel")
+	if len(m.slots) != 2 {
+		t.Fatalf("registry holds %d slots after the second detach, want 2", len(m.slots))
 	}
-	if second.ch != first.ch {
+	second := m.slots[1]
+	if second.ch != runCh {
 		t.Fatal("the second detach did not capture the run's channel")
 	}
 	if len(second.inbox) != 1 {
@@ -1321,19 +1597,19 @@ func TestBackground_TripleToggleFreesSlot(t *testing.T) {
 	}
 	m.Update(env)
 
-	if m.bg == nil || m.bg.done {
+	if second.done {
 		t.Fatal("the close did not finalize the current slot — it would hold the run forever")
 	}
-	if len(m.bg.inbox) != 0 {
-		t.Fatalf("the slot inbox holds %d prompts after the restart", len(m.bg.inbox))
+	if len(second.inbox) != 0 {
+		t.Fatalf("the slot inbox holds %d prompts after the restart", len(second.inbox))
 	}
 	if m.running {
 		t.Fatal("the slot's inbox restart leaked into the active slot's state")
 	}
-	if n := strings.Count(slotNotices(m.bg), "Background session"); n != 1 {
+	if n := strings.Count(slotNotices(second), "Background session"); n != 1 {
 		t.Fatalf("finalization slot notices = %d, want exactly 1", n)
 	}
-	m.bg.cancel()
+	second.cancel()
 }
 
 // TestBackground_AttachRestoresOpenBlocks pins the accumulator restore: the
@@ -1346,14 +1622,14 @@ func TestBackground_TripleToggleFreesSlot(t *testing.T) {
 func TestBackground_AttachRestoresOpenBlocks(t *testing.T) {
 	t.Run("thinking", func(t *testing.T) {
 		m := newTestModel(t)
-		m.bg = &backgroundRun{
+		m.addSlot(&backgroundRun{
 			started: time.Now(), done: true, sessionID: "sess-bg", title: "slot title",
 			messages: []message{
 				{role: "user", content: "q"},
 				{role: "thinking", content: "reasoning so far "},
 			},
 			buf: []agentMsg{agentThinkingMsg{text: "more"}},
-		}
+		})
 		m.todoState = &tools.TodoState{}
 		m.chatModel.AppendNotice("fork marker")
 
@@ -1376,14 +1652,14 @@ func TestBackground_AttachRestoresOpenBlocks(t *testing.T) {
 
 	t.Run("text", func(t *testing.T) {
 		m := newTestModel(t)
-		m.bg = &backgroundRun{
+		m.addSlot(&backgroundRun{
 			started: time.Now(), done: true, sessionID: "sess-bg", title: "slot title",
 			messages: []message{
 				{role: "user", content: "q"},
 				{role: "assistant", content: "part one "},
 			},
 			buf: []agentMsg{agentTextMsg{text: "part two"}},
-		}
+		})
 		m.chatModel.AppendNotice("fork marker")
 
 		newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
@@ -1417,7 +1693,8 @@ func TestBackground_RetryStateFollowsTheSession(t *testing.T) {
 	if m.lastPrompt != "" || m.lastPromptFailed {
 		t.Fatal("the fresh session inherited the slot's retry state")
 	}
-	if m.bg.lastPrompt != "slot failed prompt" || !m.bg.lastPromptFailed {
+	slot := m.slots[0]
+	if slot.lastPrompt != "slot failed prompt" || !slot.lastPromptFailed {
 		t.Fatal("the slot lost its own retry state on detach")
 	}
 
@@ -1431,7 +1708,7 @@ func TestBackground_RetryStateFollowsTheSession(t *testing.T) {
 	// Attach: the slot's retry state comes back, and Ctrl+R replays the
 	// SLOT's prompt — not the fresh session's. The slot's run finished
 	// while detached, so the attach is a plain swap.
-	m.bg.done = true
+	slot.done = true
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
 	if m.lastPrompt != "slot failed prompt" || !m.lastPromptFailed {
@@ -1457,21 +1734,20 @@ func TestBackground_RetryStateFollowsTheSession(t *testing.T) {
 
 	// Detach again: the slot session leaves with its own retry state, and
 	// the new fresh session starts with NONE — Ctrl+R there must not
-	// replay another session's prompt. (MR1 has one slot: the displaced
-	// session's state is not kept in memory, its trio lives or dies with
-	// the slot fields.)
+	// replay another session's prompt.
 	newM, _ = m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
 	if m.lastPrompt != "" || m.lastPromptFailed {
 		t.Fatalf("second detach left retry state %q failed=%v — a fresh session must not inherit one", m.lastPrompt, m.lastPromptFailed)
 	}
-	if m.bg == nil || m.bg.lastPrompt != "slot failed prompt" {
+	retrySlot := m.slots[len(m.slots)-1]
+	if retrySlot.lastPrompt != "slot failed prompt" {
 		t.Fatal("the slot lost its retry state on the second detach")
 	}
 	if model3, _ := m.handleRetry(); model3.(*model).running {
 		t.Fatal("Ctrl+R replayed into a session with no failed prompt")
 	}
-	m.bg.cancel()
+	retrySlot.cancel()
 }
 
 // TestBackground_AttachRefusesUnderPlan: symmetric with detach — plan
@@ -1481,11 +1757,11 @@ func TestBackground_AttachRefusesUnderPlan(t *testing.T) {
 	m := newTestModel(t)
 	m.mode = "plan"
 	m.planWorktree = &subagent.WorktreeManager{}
-	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "sess-bg"})
 
 	newM, _ := m.handleKey(tea.KeyPressMsg(ctrlB()))
 	m = newM.(*model)
-	if m.bg == nil {
+	if len(m.slots) != 1 {
 		t.Fatal("attach displaced the slot under a pending plan")
 	}
 	if !strings.Contains(m.flash, "Cannot attach while a plan session is active") {
@@ -1499,7 +1775,7 @@ func TestBackground_AttachRefusesUnderPlan(t *testing.T) {
 // unknown-session factory bug.
 func TestBackground_LateRequestForFinishedSlotIsDenied(t *testing.T) {
 	m := newBgTestModel(t, &heldLLM{name: "late", release: make(chan struct{})})
-	m.bg = &backgroundRun{started: time.Now(), done: true, sessionID: "sess-bg"}
+	m.addSlot(&backgroundRun{started: time.Now(), done: true, sessionID: "sess-bg"})
 	m.cfg.ApprovalCh = make(chan SessionApproval, 4)
 	m.cfg.QuestionCh = make(chan SessionQuestion, 4)
 
@@ -1519,7 +1795,7 @@ func TestBackground_LateRequestForFinishedSlotIsDenied(t *testing.T) {
 	if m.approval != nil {
 		t.Fatal("the finished slot's approval opened a dialog")
 	}
-	if m.bg.approval != nil {
+	if m.slots[0].approval != nil {
 		t.Fatal("the finished slot's approval was stashed")
 	}
 
@@ -1536,7 +1812,7 @@ func TestBackground_LateRequestForFinishedSlotIsDenied(t *testing.T) {
 	default:
 		t.Fatal("the finished slot's question was never answered")
 	}
-	if m.question != nil || m.bg.question != nil {
+	if m.question != nil || m.slots[0].question != nil {
 		t.Fatal("the finished slot's question opened a dialog or stashed")
 	}
 }
@@ -1546,7 +1822,7 @@ func TestBackground_LateRequestForFinishedSlotIsDenied(t *testing.T) {
 // session's tag is canceled, never routed.
 func TestBackground_UnknownTagQuestionIsDenied(t *testing.T) {
 	m := newBgTestModel(t, &heldLLM{name: "q-deny", release: make(chan struct{})})
-	m.bg = &backgroundRun{started: time.Now(), sessionID: "sess-bg"}
+	m.addSlot(&backgroundRun{started: time.Now(), sessionID: "sess-bg"})
 	questionCh := make(chan SessionQuestion, 4)
 	m.cfg.QuestionCh = questionCh
 	reply := make(chan tools.QuestionAnswer, 1)
@@ -1566,7 +1842,7 @@ func TestBackground_UnknownTagQuestionIsDenied(t *testing.T) {
 	if m.question != nil {
 		t.Fatal("the unknown-tagged question opened a dialog")
 	}
-	if m.bg.question != nil {
+	if m.slots[0].question != nil {
 		t.Fatal("the unknown-tagged question was stashed for the wrong slot")
 	}
 
@@ -1583,7 +1859,7 @@ func TestBackground_UnknownTagQuestionIsDenied(t *testing.T) {
 	default:
 		t.Fatal("the untagged question was never answered")
 	}
-	if m.question != nil || m.bg.question != nil {
+	if m.question != nil || m.slots[0].question != nil {
 		t.Fatal("the untagged question opened a dialog or stashed")
 	}
 }

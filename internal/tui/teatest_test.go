@@ -720,7 +720,7 @@ func TestHandleKey_CtrlBInBackgroundsEvenWithText(t *testing.T) {
 	if m.branchPopup != nil {
 		t.Fatal("expected Ctrl+B not to open the branch popup (that is Ctrl+G now)")
 	}
-	if m.bg != nil || m.running {
+	if len(m.slots) != 0 || m.running {
 		t.Fatal("expected an idle Ctrl+B to change no run state")
 	}
 	if m.flash != "Nothing to background" {

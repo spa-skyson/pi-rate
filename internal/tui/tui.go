@@ -83,11 +83,14 @@ type model struct {
 	agentCancel    context.CancelFunc // cancels the active agent response without quitting the TUI
 	pendingPrompts []queuedPrompt     // prompts submitted while a response is active
 
-	// bg is the detached run (Ctrl+B): non-nil from detach until attach.
-	// While it is alive it holds the one live main loop — new prompts queue,
-	// agent and model switches refuse — and its events buffer instead of
-	// rendering. See background.go.
-	bg *backgroundRun
+	// slots is the background-session registry (MR2): every detached or
+	// parked session lives here whole — agent, transcript, inbox, channel —
+	// in insertion order (the popup's order). The ACTIVE session is not in
+	// the registry: m.cfg.Agent, m.chatModel and friends are its live
+	// projection, and attachBackground swaps a slot's contents with the
+	// active fields, leaving the displaced session parked in the registry.
+	// See background.go.
+	slots []*backgroundRun
 
 	// turnStarted is when the current turn began (set by beginTurn next to
 	// running). The done-attention signal in handleAgentDone measures the
@@ -1450,9 +1453,10 @@ func (m *model) updateSession(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 // The tag is the whole route: the active session's dialog opens here; a
 // background session's request stashes behind a notice (background.go);
 // anything else — an empty tag is a factory bug, an unknown tag a dead
-// slot's late arrival — is denied and logged, never routed by guesswork.
+// session's late arrival — is denied and logged, never routed by guesswork.
 // Every branch re-arms the single parked reader on ApprovalCh.
 func (m *model) routeApproval(msg approvalRequestMsg) (tea.Model, tea.Cmd) {
+	s := m.slotBySession(msg.sa.SessionID)
 	switch {
 	case msg.sa.SessionID == "":
 		if msg.sa.Req.Reply != nil {
@@ -1462,9 +1466,9 @@ func (m *model) routeApproval(msg approvalRequestMsg) (tea.Model, tea.Cmd) {
 			m.cfg.Logger.Errorf("approval request without a session tag — denied (tool %s)", msg.sa.Req.Tool)
 		}
 		return m, waitForApproval(m.cfg.ApprovalCh)
-	case m.bg != nil && msg.sa.SessionID == m.bg.sessionID && !m.bg.done:
-		return m.handleBackgroundApproval(msg)
-	case m.bg != nil && msg.sa.SessionID == m.bg.sessionID:
+	case s != nil && !s.done:
+		return m.handleBackgroundApproval(s, msg)
+	case s != nil:
 		// The tag is known but its run already finished: a request left in
 		// flight when the run died. Denied, and named as what it is — not
 		// "unknown session", which would point at a factory bug.
@@ -1490,6 +1494,7 @@ func (m *model) routeApproval(msg approvalRequestMsg) (tea.Model, tea.Cmd) {
 
 // routeQuestion is routeApproval's twin for the question tool.
 func (m *model) routeQuestion(msg questionRequestMsg) (tea.Model, tea.Cmd) {
+	s := m.slotBySession(msg.sq.SessionID)
 	switch {
 	case msg.sq.SessionID == "":
 		if msg.sq.Req.Reply != nil {
@@ -1499,9 +1504,9 @@ func (m *model) routeQuestion(msg questionRequestMsg) (tea.Model, tea.Cmd) {
 			m.cfg.Logger.Errorf("question request without a session tag — canceled (%s)", truncateLabel(msg.sq.Req.Question, 60))
 		}
 		return m, waitForQuestion(m.cfg.QuestionCh)
-	case m.bg != nil && msg.sq.SessionID == m.bg.sessionID && !m.bg.done:
-		return m.handleBackgroundQuestion(msg)
-	case m.bg != nil && msg.sq.SessionID == m.bg.sessionID:
+	case s != nil && !s.done:
+		return m.handleBackgroundQuestion(s, msg)
+	case s != nil:
 		// Twin of the approval branch: the slot's run is gone, the request
 		// dies with it, and the log names the real situation.
 		if msg.sq.Req.Reply != nil {
@@ -1880,14 +1885,16 @@ func (m *model) handleInterruptKey(key tea.Key) (tea.Model, tea.Cmd, bool) {
 			m.chatModel.AppendWarning("\nEsc again to cancel...")
 			return m, resetEscCancelCount(m), true
 		}
-		if m.bgAlive() {
-			// The backgrounded run deserves the same double-Esc contract:
+		if s := m.newestLiveSlot(); s != nil {
+			// The backgrounded runs deserve the same double-Esc contract:
 			// the input is free, so a bare Esc must stay a no-op, but a
 			// deliberate Esc-Esc reaches the run the input no longer holds.
+			// With several slots the NEWEST live one is the target — stack
+			// discipline: the thing the input was freed from last.
 			m.escCancelCount++
 			if m.escCancelCount >= 2 {
 				m.escCancelCount = 0
-				return m, m.cancelBackgroundRun(), true
+				return m, m.cancelBackgroundSlot(s), true
 			}
 			m.chatModel.AppendWarning("\nEsc again to cancel the background run...")
 			return m, resetEscCancelCount(m), true
@@ -1896,15 +1903,19 @@ func (m *model) handleInterruptKey(key tea.Key) (tea.Model, tea.Cmd, bool) {
 
 	case "key.quit":
 		if m.running || m.bgAlive() {
-			var cmd tea.Cmd
-			if m.bgAlive() {
-				cmd = m.cancelBackgroundRun()
-			} else {
-				cmd = m.cancelAgent()
+			// First Ctrl+C cancels everything that is still writing — the
+			// active turn and every live slot — and warns; the second quits.
+			cmds := []tea.Cmd{}
+			if c := m.cancelAllBackgroundSlots(); c != nil {
+				cmds = append(cmds, c)
+			}
+			if m.running {
+				cmds = append(cmds, m.cancelAgent())
 			}
 			m.ctrlCCount++
 			m.chatModel.AppendWarning("\nCtrl+C again to quit...")
-			return m, tea.Batch(cmd, resetCtrlCCount(m)), true
+			cmds = append(cmds, resetCtrlCCount(m))
+			return m, tea.Batch(cmds...), true
 		}
 		m.ctrlCCount++
 		if m.ctrlCCount >= 2 {
@@ -3107,7 +3118,7 @@ func (m *model) statusRenderInput() StatusRenderInput {
 		Flash:         m.flash,
 		Palette:       m.palette,
 		RunningAgents: m.runningSubagentCount(),
-		Background:    m.backgroundStatus(),
+		Background:    m.backgroundSummary(),
 	}
 }
 

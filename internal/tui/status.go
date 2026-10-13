@@ -47,9 +47,9 @@ type StatusRenderInput struct {
 	// RunningAgents is the number of live subagents, for the ⚓ counter. Zero
 	// renders nothing.
 	RunningAgents int
-	// Background is the detached run's status, nil when nothing is
-	// backgrounded.
-	Background *BackgroundStatus
+	// Background is the slot-registry summary for the status bar, nil when
+	// nothing is backgrounded.
+	Background *BackgroundSummary
 }
 
 // runCycleInfo carries /run state for the status bar.
@@ -272,27 +272,28 @@ func statusSubagentsField(in StatusRenderInput, p Palette) []string {
 	return []string{anchorStyle.Render(fmt.Sprintf("⚓ %d", in.RunningAgents))}
 }
 
-// statusBackgroundField renders the detached run's counter: "bg 2m 13s · 34 ev"
-// while it works, "bg ✓ 34 ev" once it finished unattached (the "✓" is the
-// same shape statusLoadingField ticks with) — with ", N dropped" appended
-// when the replay buffer evicted events, because a finished run's skipped
-// events are gone for good and the count is the only trace. It sits next to
-// the ⚓ counter — both answer "what is working right now" — and is silent
-// when nothing is backgrounded, so an attached run leaves no ghost field.
+// statusBackgroundField renders the slot-registry counter: "bg N · E ev"
+// where N is every slot in the registry (live, finished, parked) and E the
+// events buffered across them, plus "⚑ K" — K slots waiting for input, the
+// v1 stash mechanic turned into a badge. It sits next to the ⚓ counter —
+// both answer "what is working right now" — and is silent when the registry
+// is empty, so an attached-everything session leaves no ghost field. Per-slot
+// elapsed and state live in the /slots popup, which has the room.
 func statusBackgroundField(in StatusRenderInput, p Palette) []string {
-	if in.Background == nil {
+	if in.Background == nil || in.Background.Slots == 0 {
 		return nil
 	}
 	bgStyle := lipgloss.NewStyle().Foreground(p.Mauve)
-	if in.Background.Done {
-		text := fmt.Sprintf("bg ✓ %d ev", in.Background.Events)
-		if in.Background.Dropped > 0 {
-			text += fmt.Sprintf(", %d dropped", in.Background.Dropped)
-		}
-		return []string{bgStyle.Render(text)}
+	text := fmt.Sprintf("bg %d", in.Background.Slots)
+	if in.Background.Events > 0 {
+		text += fmt.Sprintf(" · %d ev", in.Background.Events)
 	}
-	return []string{bgStyle.Render(fmt.Sprintf("bg %s · %d ev",
-		formatTurnDuration(in.Background.Elapsed), in.Background.Events))}
+	parts := []string{bgStyle.Render(text)}
+	if in.Background.Awaiting > 0 {
+		waitStyle := lipgloss.NewStyle().Foreground(p.Peach)
+		parts = append(parts, waitStyle.Render(fmt.Sprintf("⚑ %d", in.Background.Awaiting)))
+	}
+	return parts
 }
 
 // statusRunCycleField renders the /run cycle indicator. The spec name is
