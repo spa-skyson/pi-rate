@@ -619,6 +619,46 @@ func TestChatModel_AppendWarning(t *testing.T) {
 	}
 }
 
+func TestLastAssistantText(t *testing.T) {
+	tests := []struct {
+		name string
+		msgs []message
+		want string
+	}{
+		{
+			name: "last non-service assistant",
+			msgs: []message{
+				{role: "user", content: "question"},
+				{role: "assistant", content: "REAL ANSWER"},
+				{role: "tool", tool: "read", content: "result"},
+				{role: "assistant", content: "ERR", isError: true},
+				{role: "assistant", content: "warning", isWarning: true},
+			},
+			want: "REAL ANSWER",
+		},
+		{name: "empty messages", msgs: nil, want: ""},
+		{name: "only user", msgs: []message{{role: "user", content: "question"}}, want: ""},
+		{
+			name: "skips empty latest assistant",
+			msgs: []message{
+				{role: "assistant", content: "previous"},
+				{role: "assistant", content: ""},
+			},
+			want: "previous",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cm := NewChatModel(nil)
+			cm.Messages = tt.msgs
+			if got := cm.LastAssistantText(); got != tt.want {
+				t.Errorf("LastAssistantText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- Helper functions ---
 
 func TestChatModel_CountByRole(t *testing.T) {

@@ -204,6 +204,22 @@ func TestSelectedTextTrimsPadding(t *testing.T) {
 	}
 }
 
+func TestSelectedTextStripsBorderColumns(t *testing.T) {
+	m := selectionModel(t)
+	m.View()
+	row, _ := findRow(t, m, "SELECT-ME-TWO")
+	m = drag(t, m, 0, row, m.chatWidth()-1, row)
+
+	got := selectedText(m.lastFrame, m.sel, m.chatWidth())
+
+	if strings.ContainsAny(got, "╭╮╰╯│┃┏┓┗┛┣┫├┤") {
+		t.Errorf("copied text keeps border columns: %q", got)
+	}
+	if !strings.Contains(got, "SELECT-ME-TWO") {
+		t.Errorf("copied %q, want it to contain the message", got)
+	}
+}
+
 func TestCopySelectionIgnoresBlankText(t *testing.T) {
 	if cmd := copySelection("   \n  "); cmd != nil {
 		t.Error("blank selection still tried to write the clipboard")
