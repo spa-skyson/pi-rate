@@ -739,6 +739,38 @@ func TestAgentResult(t *testing.T) {
 
 // --- subagentHandler error mode tests ---
 
+func TestSubagentHandler_EmptyInput(t *testing.T) {
+	orch := subagent.NewOrchestrator(defaultConfigPtr(), "", nil)
+
+	// Zero-value input: the function call arrived with no arguments at all.
+	input := SubagentInput{}
+	_, err := subagentHandler(nil, orch, input, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for empty input")
+	}
+	if !strings.Contains(err.Error(), "empty subagent invocation") {
+		t.Errorf("error = %q, want it to contain 'empty subagent invocation'", err.Error())
+	}
+}
+
+func TestSubagentHandler_BaseOnlyIsModeConflict(t *testing.T) {
+	orch := subagent.NewOrchestrator(defaultConfigPtr(), "", nil)
+
+	// A lone base is not empty and not a mode: it falls through to the
+	// unchanged mode-conflict error.
+	input := SubagentInput{Base: "main"}
+	_, err := subagentHandler(nil, orch, input, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for base-only input")
+	}
+	if !strings.Contains(err.Error(), "provide exactly ONE of") {
+		t.Errorf("error = %q, want it to contain 'provide exactly ONE of'", err.Error())
+	}
+	if strings.Contains(err.Error(), "empty") {
+		t.Errorf("error = %q, must not mention 'empty'", err.Error())
+	}
+}
+
 func TestSubagentHandler_AmbiguousInput(t *testing.T) {
 	orch := subagent.NewOrchestrator(defaultConfigPtr(), "", nil)
 
