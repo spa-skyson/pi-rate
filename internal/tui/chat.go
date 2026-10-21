@@ -745,6 +745,21 @@ func (c *ChatModel) PlainTranscript() string {
 	return b.String()
 }
 
+// LastAssistantText returns the most recent non-service assistant message.
+func (c *ChatModel) LastAssistantText() string {
+	for i := len(c.Messages) - 1; i >= 0; i-- {
+		msg := c.Messages[i]
+		if msg.role != "assistant" || msg.isError || msg.isWarning || msg.isMeta || msg.preRendered {
+			continue
+		}
+		content := strings.TrimSpace(msg.content)
+		if content != "" {
+			return content
+		}
+	}
+	return ""
+}
+
 func transcriptLabel(msg message) string {
 	switch msg.role {
 	case "user":

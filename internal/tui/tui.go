@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/spa-skyson/pi-rate/internal/auth"
 	"github.com/spa-skyson/pi-rate/internal/config"
@@ -1635,6 +1636,11 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+const (
+	leftCardBorder  = "│╭╰├┃┏┗┣"
+	rightCardBorder = "│╮╯┤┃┓┛┫"
+)
+
 // handleMouseRelease ends the drag and copies the selection.
 //
 // Copy on release, with no extra keystroke: that is what the terminal used to do
@@ -1654,10 +1660,31 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd)
 	m.sel.cursorX, m.sel.cursorY = m.clampToChat(mouse.X, mouse.Y)
 
 	if m.sel.empty() {
+		// A plain click on a chat-card border copies the last assistant reply
+		// without its chrome (frame/gutter). Drag selection is untouched.
+		if text := m.lastAssistantFromClick(); text != "" {
+			return m, m.copyAndFlash(text)
+		}
 		m.sel = selection{} // a plain click, not a drag: just clear
 		return m, nil
 	}
 	return m, m.copyAndFlash(selectedText(m.lastFrame, m.sel, m.chatWidth()))
+}
+
+// lastAssistantFromClick returns the last assistant reply when the click landed
+// on a chat-card border, else "".
+func (m *model) lastAssistantFromClick() string {
+	lines := strings.Split(m.lastFrame, "\n")
+	if m.sel.cursorY < 0 || m.sel.cursorY >= len(lines) {
+		return ""
+	}
+	line := lines[m.sel.cursorY]
+	left := []rune(ansi.Strip(ansi.Cut(line, 0, 1)))
+	right := []rune(ansi.Strip(ansi.Cut(line, m.chatWidth()-1, m.chatWidth())))
+	if len(left) == 0 || len(right) == 0 || !strings.ContainsRune(leftCardBorder, left[0]) || !strings.ContainsRune(rightCardBorder, right[0]) {
+		return ""
+	}
+	return m.chatModel.LastAssistantText()
 }
 
 // clampToChat converts a mouse position into a chat-panel cell.
