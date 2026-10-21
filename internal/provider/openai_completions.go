@@ -451,8 +451,12 @@ type oaiExtractHooks struct {
 	// delta.reasoning_content field) when the provider did not bring its own,
 	// so an installed extractor owns reasoning extraction exclusively.
 	deltaThinking func(rawChunk string) string
-	// messageThinking pulls reasoning text out of a non-streaming completion's
-	// raw JSON. nil means the completion carries nothing to extract.
+	// messageThinking pulls reasoning text out of a non-streaming
+	// completion's raw JSON. On the non-streaming path the field is never
+	// nil: oaiRunNonStreamingHooks installs the default
+	// (oaiMessageReasoningContent, reading the standard message.reasoning_content
+	// field) when the provider did not bring its own, so an installed extractor
+	// owns reasoning extraction exclusively.
 	messageThinking func(rawResponse string) string
 	// answerText rewrites the content string the SDK decoded before it is
 	// treated as answer text. Mistral reasoning models send content as a JSON
@@ -577,6 +581,30 @@ func oaiDeltaReasoningContent(rawChunk string) string {
 	return payload.Choices[0].Delta.ReasoningContent
 }
 
+// oaiMessageReasoningContent extracts the reasoning text from a non-streaming
+// completion's raw JSON, reading choices[].message.reasoning_content — the
+// field OpenAI-compatible endpoints return model thinking in when they answer
+// without streaming (DeepSeek, LiteLLM-style proxies serving reasoning models
+// with stream=false). The openai-go SDK has no field for it, so it is
+// recovered from the completion's raw JSON the same way the streaming path
+// recovers delta.reasoning_content. Returns "" when the completion carries none.
+func oaiMessageReasoningContent(rawResponse string) string {
+	var payload struct {
+		Choices []struct {
+			Message struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(rawResponse), &payload); err != nil {
+		return ""
+	}
+	if len(payload.Choices) == 0 {
+		return ""
+	}
+	return payload.Choices[0].Message.ReasoningContent
+}
+
 func oaiRunNonStreaming(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool) {
 	oaiRunNonStreamingExtract(ctx, client, params, yield, nil)
 }
@@ -591,11 +619,13 @@ func oaiRunNonStreamingExtract(ctx context.Context, client *openai.Client, param
 // oaiRunNonStreamingHooks is oaiRunNonStreaming with the full set of provider
 // hooks (see oaiExtractHooks). The reasoning is prepended to the response parts.
 //
-// Unlike the streaming path, this one has no default reasoning extractor: a
-// completion whose thinking arrives in message.reasoning_content is decoded
-// only by a provider that installs messageThinking for it. The asymmetry is a
-// known limitation — the reason the streaming path got its default is the
-// idle watcher, which does not apply here.
+// A provider that installs its own messageThinking extractor keeps exclusive
+// ownership of reasoning extraction. One without one gets the default, which
+// reads the standard message.reasoning_content field: reasoning models on
+// OpenAI-compatible endpoints (DeepSeek, LiteLLM-style proxies) answer
+// without streaming, and completions carrying only that field previously
+// produced no thinking at all — a complete turn would surface as an empty
+// response or just the answer, dropping the thinking it cost real tokens.
 func oaiRunNonStreamingHooks(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool, hooks oaiExtractHooks) {
 	completion, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {
@@ -606,13 +636,14 @@ func oaiRunNonStreamingHooks(ctx context.Context, client *openai.Client, params 
 		yield(&model.LLMResponse{ErrorCode: "API_ERROR", ErrorMessage: "no choices in response"}, nil)
 		return
 	}
+	if hooks.messageThinking == nil {
+		hooks.messageThinking = oaiMessageReasoningContent
+	}
 	choice := completion.Choices[0]
 	msg := choice.Message
 	parts := make([]*genai.Part, 0, 2+len(msg.ToolCalls))
-	if hooks.messageThinking != nil {
-		if thinking := hooks.messageThinking(completion.RawJSON()); thinking != "" {
-			parts = append(parts, &genai.Part{Text: thinking})
-		}
+	if thinking := hooks.messageThinking(completion.RawJSON()); thinking != "" {
+		parts = append(parts, &genai.Part{Text: thinking})
 	}
 	if text := hooks.answer(msg.Content); text != "" {
 		parts = append(parts, &genai.Part{Text: text})

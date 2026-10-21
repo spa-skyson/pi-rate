@@ -383,3 +383,138 @@ func TestIdleTimerSeesReasoningStreamAsLive(t *testing.T) {
 		}
 	})
 }
+
+func TestOaiMessageReasoningContent(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "message reasoning content",
+			raw:  `{"choices":[{"index":0,"message":{"reasoning_content":"deep thought"}}]}`,
+			want: "deep thought",
+		},
+		{
+			name: "message reasoning alongside answer content",
+			raw:  `{"choices":[{"index":0,"message":{"content":"answer","reasoning_content":"deep thought"}}]}`,
+			want: "deep thought",
+		},
+		{name: "answer-only message", raw: `{"choices":[{"index":0,"message":{"content":"hello"}}]}`},
+		{name: "role-only message", raw: `{"choices":[{"index":0,"message":{"role":"assistant"}}]}`},
+		{name: "usage-only response", raw: `{"usage":{"prompt_tokens":1}}`},
+		{name: "empty choices", raw: `{"choices":[]}`},
+		{name: "malformed JSON", raw: `{"choices":[`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := oaiMessageReasoningContent(tt.raw); got != tt.want {
+				t.Errorf("oaiMessageReasoningContent() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A non-streaming completion that carries its thinking in
+// choices[0].message.reasoning_content must surface that thinking as a
+// thinking-role part in the final response, prepended before the answer —
+// the same shape the streaming path emits.
+func TestOpenAINonStreamingReasoningContentBecomesThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"id":"chatcmpl-ns1","object":"chat.completion","model":"glm-4.7",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"Hello",` +
+			`"reasoning_content":"deep "},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":9,"total_tokens":14}}`
+		if _, err := w.Write([]byte(body)); err != nil {
+			return
+		}
+	}))
+	defer srv.Close()
+
+	llm, err := NewOpenAI(context.Background(), "gpt-4o", "sk-test", srv.URL, nil)
+	if err != nil {
+		t.Fatalf("NewOpenAI: %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+	}
+	var last *model.LLMResponse
+	for resp, err := range llm.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("non-streaming turn returned error: %v", err)
+		}
+		if resp.ErrorCode != "" {
+			t.Fatalf("non-streaming turn returned error response: %+v", resp)
+		}
+		last = resp
+	}
+	// non-streaming path prepends reasoning as the first part of the model content,
+	// matching the Mistral non-streaming convention (no separate "thinking" role).
+	if last == nil || !last.TurnComplete {
+		t.Fatal("expected a final TurnComplete response")
+	}
+	if last.Content == nil {
+		t.Fatal("expected a final response with content")
+	}
+	parts := last.Content.Parts
+	if len(parts) != 2 {
+		t.Fatalf("model content parts = %d, want 2 (reasoning then answer)", len(parts))
+	}
+	if parts[0].Text != "deep " {
+		t.Errorf("reasoning part = %q, want %q", parts[0].Text, "deep ")
+	}
+	if parts[1].Text != "Hello" {
+		t.Errorf("answer part = %q, want %q", parts[1].Text, "Hello")
+	}
+}
+
+// A provider that installs its own messageThinking extractor keeps exclusive
+// ownership of reasoning extraction: the default message.reasoning_content path
+// must stay out entirely, or Mistral/OpenRouter-class providers would see their
+// reasoning extracted twice by competing hooks.
+func TestOpenAINonStreamingInstalledHookOwnsReasoningExtraction(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"id":"chatcmpl-ns2","object":"chat.completion","model":"gpt-4o",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"answer",` +
+			`"reasoning_content":"secret reasoning"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":9,"total_tokens":14}}`
+		if _, err := w.Write([]byte(body)); err != nil {
+			return
+		}
+	}))
+	defer srv.Close()
+
+	client := openai.NewClient(option.WithAPIKey("sk-test"), option.WithBaseURL(srv.URL))
+	hookCalls := 0
+	hooks := oaiExtractHooks{
+		messageThinking: func(string) string {
+			hookCalls++
+			return ""
+		},
+	}
+	var partTexts []string
+	params := openai.ChatCompletionNewParams{
+		Model:    "gpt-4o",
+		Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("hi")},
+	}
+	oaiRunNonStreamingHooks(context.Background(), &client, params,
+		func(resp *model.LLMResponse, err error) bool {
+			if resp != nil && resp.TurnComplete && resp.Content != nil {
+				for _, p := range resp.Content.Parts {
+					if p.Text != "" {
+						partTexts = append(partTexts, p.Text)
+					}
+				}
+			}
+			return true
+		}, hooks)
+
+	if hookCalls == 0 {
+		t.Fatal("the installed hook was never called")
+	}
+	if len(partTexts) != 1 || partTexts[0] != "answer" {
+		t.Errorf("final parts = %v, want [answer]: the installed hook owns extraction", partTexts)
+	}
+}
