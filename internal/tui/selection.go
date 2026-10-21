@@ -114,6 +114,13 @@ func highlight(frame string, sel selection, selWidth, frameWidth int) string {
 	return strings.Join(lines, "\n")
 }
 
+// Border columns used by lipgloss RoundedBorder and ThickBorder. Horizontal
+// rules are deliberately absent: they are also valid message content.
+const (
+	leftBorderRunes  = "│╭╰├┃┏┗┣"
+	rightBorderRunes = "│╮╯┤┃┓┛┫"
+)
+
 // selectedText extracts the selection from the frame as plain text.
 // Trailing padding is trimmed per line — the frame pads every row out to the
 // full width, and nobody wants to paste a block of trailing spaces.
@@ -128,7 +135,18 @@ func selectedText(frame string, sel selection, selWidth int) string {
 		if !ok {
 			continue
 		}
-		out = append(out, strings.TrimRight(ansi.Strip(ansi.Cut(line, lo, hi)), " "))
+		text := strings.TrimRight(ansi.Strip(ansi.Cut(line, lo, hi)), " ")
+		if runes := []rune(text); len(runes) > 0 && strings.ContainsRune(leftBorderRunes, runes[0]) {
+			text = string(runes[1:])
+		}
+		text = strings.TrimRight(text, " ")
+		if len(text) > 0 {
+			runes := []rune(text)
+			if strings.ContainsRune(rightBorderRunes, runes[len(runes)-1]) {
+				text = string(runes[:len(runes)-1])
+			}
+		}
+		out = append(out, text)
 	}
 	return strings.Join(out, "\n")
 }
