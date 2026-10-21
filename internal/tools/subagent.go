@@ -307,6 +307,15 @@ func subagentHandler(ctx agent.Context, orch *subagent.Orchestrator, input Subag
 	case "chain":
 		return chainModeHandler(ctx, orch, input, onEvent)
 	default:
+		// Fully empty input is a distinct failure: the caller produced a
+		// function call that carried no arguments at all (zero-value
+		// SubagentInput). Reporting it as a mode conflict would send the
+		// model down a wrong recovery path — there is nothing to resolve.
+		if input.Agent == "" && input.Task == "" && input.Base == "" && len(input.Tasks) == 0 && len(input.Chain) == 0 {
+			return SubagentOutput{}, fmt.Errorf(
+				"empty subagent invocation: no agent, task, tasks, or chain provided " +
+					"(the function call likely carried no arguments)")
+		}
 		return SubagentOutput{}, fmt.Errorf(
 			"could not detect mode: provide exactly ONE of:\n"+
 				"  Single: {agent: \"\\u003cname\\u003e\", task: \"\\u003cprompt\\u003e\"} — spawn one agent\n"+
