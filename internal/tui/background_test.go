@@ -7,6 +7,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -643,6 +644,9 @@ func TestBackground_DetachedPromptStartsImmediately(t *testing.T) {
 // SessionService, regardless of what the TUI renders (AGENTS.md: durability
 // is the run's, not the render's).
 func TestBackground_BackgroundSessionWritesEventsAfterDetach(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the detached run keeps events.jsonl open and FileService has no Close, so Windows file locking breaks TempDir cleanup (AGENTS.md: opened dir handle breaks cleanup)")
+	}
 	dir := t.TempDir()
 	svc, err := pisession.NewFileService(dir)
 	if err != nil {
