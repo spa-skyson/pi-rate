@@ -65,7 +65,7 @@ func TestFilterBuildOutput_Golden(t *testing.T) {
 			want: "main.go:3:5: undefined: foo\n  context one\n  context two\n" +
 				"main.go:9:1: error: bad thing\n  detail a\n" +
 				"FAIL\tpkg/a\t0.1s\nok  \tpkg/b\t0.2s\nbuild failed\nexit status 2\n" +
-				"... (2 errors shown, may have more)\n\u2026 (+74 bytes truncated)",
+				"... (2 errors shown, may have more)\n\u2026 (+\u226574 bytes truncated)",
 			applied: true,
 		},
 		{
@@ -76,7 +76,7 @@ func TestFilterBuildOutput_Golden(t *testing.T) {
 				"FAIL\tpkg/a\t0.1s", "ok  \tpkg/b\t0.2s", "build failed",
 				"exit status 1", "line ten", "line eleven",
 			),
-			want:    "FAIL\tpkg/a\t0.1s\nok  \tpkg/b\t0.2s\nbuild failed\nexit status 1\n\u2026 (+70 bytes truncated)",
+			want:    "FAIL\tpkg/a\t0.1s\nok  \tpkg/b\t0.2s\nbuild failed\nexit status 1\n\u2026 (+\u226570 bytes truncated)",
 			applied: true,
 		},
 		{
@@ -173,7 +173,7 @@ func TestAggregateTestOutput_Golden(t *testing.T) {
 			want: "Test Summary: PASS=1 FAIL=1 SKIP=1\n\nFailure Details:\n" +
 				"--- FAIL: TestOne (0.00s)\n    one_test.go:10: boom\n    one_test.go:11: more\n\n" +
 				"... and 1 more failures\n\nPackage Results:\n" +
-				"FAIL\tpkg/a\t0.15s\nok  \tpkg/b\t0.25s\n\n\u2026 (+151 bytes truncated)",
+				"FAIL\tpkg/a\t0.15s\nok  \tpkg/b\t0.25s\n\n\u2026 (+\u2265151 bytes truncated)",
 			applied: true,
 		},
 		{
@@ -181,7 +181,7 @@ func TestAggregateTestOutput_Golden(t *testing.T) {
 			cfg:  cxCfg(nil),
 			in:   cxLines(passOnly...),
 			want: "Test Summary: PASS=2 FAIL=0 SKIP=0\n\nPackage Results:\n" +
-				"ok  \tpkg/one\t0.10s\nok  \tpkg/two\t0.20s\n\n\u2026 (+332 bytes truncated)",
+				"ok  \tpkg/one\t0.10s\nok  \tpkg/two\t0.20s\n\n\u2026 (+\u2265332 bytes truncated)",
 			applied: true,
 		},
 		{
@@ -364,7 +364,7 @@ func TestCompactGitDiffText_Golden(t *testing.T) {
 				"@@ -1,4 +1,6 @@\n ctx\n+add one\n+add two\n" +
 				"  ... (1 deletion, 1 addition truncated)\n  (+3 -1)\n" +
 				"diff --git a/b.go b/b.go\n--- a/b.go\n+++ b/b.go\n" +
-				"\n... (12 lines omitted from diff)\n\n\u2026 (+318 bytes truncated)\n",
+				"\n... (10 lines omitted from diff)\n\n\u2026 (+296 bytes truncated)\n",
 			applied: true,
 		},
 		{

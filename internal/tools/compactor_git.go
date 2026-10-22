@@ -256,6 +256,13 @@ type diffTextCompactor struct {
 	additions   int
 	deletions   int
 
+	// srcIndex is the position in the caller's line slice of the line consume
+	// last saw. The final cut marker is computed from it, not from totalLines:
+	// totalLines counts emitted lines only, while hunk lines past the cap are
+	// consumed but never emitted — slicing by totalLines would re-attribute
+	// already-consumed lines to the omitted tail and inflate the marker.
+	srcIndex int
+
 	// Per-hunk counters for the lines dropped past MaxDiffHunkLines. Without
 	// them a cap that lands inside an unbalanced run shows only one sign, and
 	// the hunk reads as a pure removal (or addition) when it was neither. rtk
@@ -381,7 +388,8 @@ func compactGitDiffText(s string, cfg CompactorConfig) (string, bool) {
 	}
 
 	c := &diffTextCompactor{cfg: cfg}
-	for _, line := range lines {
+	for i, line := range lines {
+		c.srcIndex = i
 		if c.totalLines >= cfg.MaxDiffLines {
 			break
 		}
@@ -392,11 +400,18 @@ func compactGitDiffText(s string, cfg CompactorConfig) (string, bool) {
 	c.flushHunkNote()
 	c.flushFile()
 
-	if c.totalLines < len(lines) {
-		omitted := strings.Join(lines[c.totalLines:], "\n")
-		fmt.Fprintf(&c.b, "\n... (%d lines omitted from diff)\n", len(lines)-c.totalLines)
-		// The lines count discloses the diff structure; the shared char marker
-		// says how much text the cut removed in absolute terms.
+	if c.srcIndex < len(lines) {
+		// Slice by srcIndex — the position the loop stopped at — not by
+		// totalLines: consumed-but-unemitted hunk lines belong to the kept
+		// side's accounting already, so the marker names the true remainder.
+		// srcIndex == len(lines) cannot happen: the loop breaks by totalLines
+		// before consuming the last line only when that line would push
+		// totalLines past the cap, i.e. the cut is real.
+		omitted := strings.Join(lines[c.srcIndex:], "\n")
+		fmt.Fprintf(&c.b, "\n... (%d lines omitted from diff)\n", len(lines)-c.srcIndex)
+		// The lines count discloses the diff structure; the shared byte marker
+		// says how much text the cut removed in absolute terms — exact here,
+		// because both sides of the subtraction are byte-measured.
 		c.b.WriteString(truncationMarker(len(omitted)))
 		c.b.WriteString("\n")
 	}

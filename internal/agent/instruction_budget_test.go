@@ -19,6 +19,7 @@ import (
 // exceeds maxInstructionTotal through a single oversized Rules block, and a
 // second variant that spreads the overage across Base and Rules. Both must
 // fail, and the error must name every section that is itself over the budget.
+// Sizes are byte counts: multi-byte content must count by len(), not runes.
 func TestInstructionBudgetOverFailsWithAllSections(t *testing.T) {
 	hugeRules := strings.Repeat("r", maxInstructionTotal+1)
 
@@ -63,6 +64,9 @@ func TestInstructionBudgetOverFailsWithAllSections(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected the total-budget gate to fail, got nil")
 		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("%d bytes", len(parts.String()))) {
+			t.Errorf("error must state the byte total: %v", err)
+		}
 		if strings.Contains(err.Error(), "Base=") || strings.Contains(err.Error(), "Rules=") {
 			t.Errorf("no section is individually over; none may be named: %v", err)
 		}
@@ -70,6 +74,26 @@ func TestInstructionBudgetOverFailsWithAllSections(t *testing.T) {
 			t.Errorf("the spread case must say so: %v", err)
 		}
 	})
+}
+
+// TestInstructionBudgetCountsBytes pins the byte contract directly: a prompt
+// over the budget in bytes but under it in runes must still fail, and the
+// error must report byte counts.
+func TestInstructionBudgetCountsBytes(t *testing.T) {
+	// 16_000 two-byte runes = 32_000 bytes: over the gate by bytes, exactly
+	// half of it by runes — a rune-counted gate would let this through.
+	parts := InstructionParts{Base: strings.Repeat("ы", maxInstructionTotal/2)}
+	if runes := len([]rune(parts.String())); runes*2 != len(parts.String()) || len(parts.String()) != maxInstructionTotal {
+		t.Fatalf("fixture is wrong: %d runes, %d bytes", runes, len(parts.String()))
+	}
+	parts.Rules = rulesSectionMarker + "one more byte"
+	err := checkInstructionTotal(parts.String(), &parts)
+	if err == nil {
+		t.Fatal("a prompt over the byte budget must fail even when under it in runes")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d bytes", len(parts.String()))) {
+		t.Errorf("error must report the byte total: %v", err)
+	}
 }
 
 // TestInstructionBudgetUnderPasses keeps the gate open for a prompt at and
@@ -82,10 +106,10 @@ func TestInstructionBudgetUnderPasses(t *testing.T) {
 		Skills: skillsSectionMarker + "small",
 	}
 	if len(parts.String()) != maxInstructionTotal-5 {
-		t.Fatalf("test prompt is %d chars, want %d", len(parts.String()), maxInstructionTotal-5)
+		t.Fatalf("test prompt is %d bytes, want %d", len(parts.String()), maxInstructionTotal-5)
 	}
 	if err := checkInstructionTotal(parts.String(), &parts); err != nil {
-		t.Fatalf("prompt at %d chars must pass: %v", len(parts.String()), err)
+		t.Fatalf("prompt at %d bytes must pass: %v", len(parts.String()), err)
 	}
 
 	recovered := instructionOnlyParts(parts.String())
@@ -119,7 +143,7 @@ func TestDefaultPromptUnderBudget(t *testing.T) {
 	parts := loadInstructionPartsFrom(SystemInstruction, root, t.TempDir())
 	prompt := parts.String()
 	if len(prompt) > maxInstructionTotal {
-		t.Fatalf("default system prompt is %d chars, over the %d gate; shrink it before raising the limit", len(prompt), maxInstructionTotal)
+		t.Fatalf("default system prompt is %d bytes, over the %d gate; shrink it before raising the limit", len(prompt), maxInstructionTotal)
 	}
 	if err := checkInstructionTotal(prompt, &parts); err != nil {
 		t.Fatalf("default prompt must pass the gate: %v", err)
@@ -144,31 +168,25 @@ func collectNotices(t *testing.T) func() []string {
 	}
 }
 
-// resetWarnedSkills clears the once-per-skill dedup between tests. Safe to
-// install as a t.Cleanup as well as call directly.
-func resetWarnedSkills(t *testing.T) {
-	t.Helper()
-	clear := func() {
-		warnedSkills.Range(func(key, _ any) bool {
-			warnedSkills.Delete(key)
-			return true
-		})
-	}
-	clear()
-	t.Cleanup(clear)
+// hygieneAgent returns a bare agent whose warnedSkills dedup state starts
+// empty, for hygiene tests that drive the notice path directly.
+func hygieneAgent() *Agent {
+	return &Agent{}
 }
 
 // TestSkillTriggerHygiene raises exactly one warning for a skill whose
 // description carries no activation marker, none for one that does, and
 // leaves the menu byte-identical either way.
 func TestSkillTriggerHygiene(t *testing.T) {
-	resetWarnedSkills(t)
+	a := hygieneAgent()
 	notices := collectNotices(t)
 
 	noTrigger := extension.Skill{Name: "mute-skill", Description: "Does things quickly and well."}
 	withTrigger := extension.Skill{Name: "loud-skill", Description: "Use when the user asks for noise. Also more detail."}
+	skills := []extension.Skill{noTrigger, withTrigger}
 
-	menu := appendSkillsMenu([]extension.Skill{noTrigger, withTrigger})
+	menu := appendSkillsMenu(skills)
+	a.warnSkillTriggers(skills)
 
 	raised := notices()
 	for _, msg := range raised {
@@ -181,8 +199,8 @@ func TestSkillTriggerHygiene(t *testing.T) {
 	}
 
 	// A second assembly of the same menu is the every-turn case: still one
-	// warning per skill per session, not one per rebuild.
-	appendSkillsMenu([]extension.Skill{noTrigger, withTrigger})
+	// warning per skill per agent, not one per rebuild.
+	a.warnSkillTriggers(skills)
 	if hits := countMsgs(notices(), "skill mute-skill:"); hits != 1 {
 		t.Errorf("got %d warnings after a rebuild, want exactly 1", hits)
 	}
@@ -194,18 +212,46 @@ func TestSkillTriggerHygiene(t *testing.T) {
 	}
 }
 
+// TestSkillWarningDedupIsPerAgent builds two agents in one process and
+// requires each to warn for the same misauthored skill exactly once: the
+// dedup set lives on the agent, so one agent's warning must not silence
+// another's.
+func TestSkillWarningDedupIsPerAgent(t *testing.T) {
+	notices := collectNotices(t)
+
+	mute := extension.Skill{Name: "mute-skill", Description: "Does things quickly and well."}
+	a1, a2 := hygieneAgent(), hygieneAgent()
+
+	a1.warnSkillTriggers([]extension.Skill{mute})
+	if hits := countMsgs(notices(), "skill mute-skill:"); hits != 1 {
+		t.Fatalf("first agent: got %d warnings, want exactly 1: %q", hits, notices())
+	}
+
+	a2.warnSkillTriggers([]extension.Skill{mute})
+	if hits := countMsgs(notices(), "skill mute-skill:"); hits != 2 {
+		t.Errorf("second agent must warn once for itself, got %d total warnings: %q", hits, notices())
+	}
+
+	// And each agent stays silent on its own repeats.
+	a1.warnSkillTriggers([]extension.Skill{mute})
+	a2.warnSkillTriggers([]extension.Skill{mute})
+	if hits := countMsgs(notices(), "skill mute-skill:"); hits != 2 {
+		t.Errorf("repeats within an agent must stay deduplicated, got %d total: %q", hits, notices())
+	}
+}
+
 // TestSanitizedSkillNameInNotice feeds a skill whose name carries an ESC/OSC
 // escape sequence and is longer than 64 runes, and asserts the notice carries
 // a clean, length-capped name while a valid name passes through unchanged.
 func TestSanitizedSkillNameInNotice(t *testing.T) {
-	resetWarnedSkills(t)
+	a := hygieneAgent()
 	notices := collectNotices(t)
 
 	// ESC survives the audit scanner's ASCII fast path; the ']' OSC payload
 	// is ASCII and by design stays in the menu name, so the notice test
 	// keys on the sanitized remainder of the name.
 	dirty := "\x1b]2;pwned\x07evil-\x1b[31mred\n\r\tname"
-	appendSkillsMenu([]extension.Skill{{Name: dirty, Description: "No trigger here."}})
+	a.warnSkillTriggers([]extension.Skill{{Name: dirty, Description: "No trigger here."}})
 
 	raised := notices()
 	if len(raised) != 1 {
@@ -224,13 +270,12 @@ func TestSanitizedSkillNameInNotice(t *testing.T) {
 		t.Errorf("sanitized name missing from notice: %q", got)
 	}
 
-	// A name with nothing to strip passes through byte-for-byte.
 	// A name with nothing to strip passes through byte-for-byte. The dirty
 	// notice stays in the recorder (dedup is by raw name), so read the last
-	// one — the second appendSkillsMenu raised exactly one more.
-	resetWarnedSkills(t)
+	// one — the fresh agent raised exactly one more notice.
+	b := hygieneAgent()
 	const plain = "perfectly-fine-skill"
-	appendSkillsMenu([]extension.Skill{{Name: plain, Description: "No trigger here either."}})
+	b.warnSkillTriggers([]extension.Skill{{Name: plain, Description: "No trigger here either."}})
 	raised = notices()
 	if n := len(raised); n != 2 || !strings.Contains(raised[n-1], "skill "+plain+":") {
 		t.Errorf("valid name mangled: %q", raised)
@@ -241,10 +286,10 @@ func TestSanitizedSkillNameInNotice(t *testing.T) {
 // runes with an ellipsis, so one giant frontmatter name cannot flood the
 // notice area.
 func TestLongSkillNameTruncatedInNotice(t *testing.T) {
-	resetWarnedSkills(t)
+	a := hygieneAgent()
 	notices := collectNotices(t)
 
-	appendSkillsMenu([]extension.Skill{{
+	a.warnSkillTriggers([]extension.Skill{{
 		Name:        strings.Repeat("ы", maxSkillNameRunes+20),
 		Description: "No trigger here.",
 	}})
@@ -270,10 +315,10 @@ func TestLongSkillNameTruncatedInNotice(t *testing.T) {
 // TestRussianTriggerMarkers accepts the Russian activation markers the same
 // way: a description that only says "используй когда" or "если" is fine.
 func TestRussianTriggerMarkers(t *testing.T) {
-	resetWarnedSkills(t)
+	a := hygieneAgent()
 	notices := collectNotices(t)
 
-	appendSkillsMenu([]extension.Skill{
+	a.warnSkillTriggers([]extension.Skill{
 		{Name: "ru-when", Description: "Используй когда нужно планировать."},
 		{Name: "ru-if", Description: "Помогает, если задача объёмная."},
 	})
@@ -362,6 +407,67 @@ func TestContextInventoryInSessionLog(t *testing.T) {
 	}
 	if entry.base < len(base) {
 		t.Errorf("inventory base=%d, want >= %d (the base section)", entry.base, len(base))
+	}
+}
+
+// TestInventoryOnInstructionRebuild mirrors TestContextInventoryInSessionLog
+// for RebuildWithInstruction: every other rebuild path (model, session) and
+// New() write the context inventory into the session log, so an instruction
+// rebuild — a new context cost — must too. The new line must describe the
+// rebuilt prompt, not the original one.
+func TestInventoryOnInstructionRebuild(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+
+	log, err := logger.New()
+	if err != nil {
+		t.Fatalf("logger.New() error: %v", err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+
+	const base = "base prompt for rebuild inventory test"
+	a, err := New(Config{
+		Model:       &mockLLM{name: "test-model", response: "ok"},
+		Instruction: base,
+		WorkingDir:  t.TempDir(),
+		Logger:      log,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if _, _, err := a.CreateSession(t.Context()); err != nil {
+		t.Fatalf("CreateSession() error: %v", err)
+	}
+
+	// Rebuild with a distinctly larger instruction, then require a second
+	// inventory line whose total matches the rebuilt prompt.
+	rebuilt := base + strings.Repeat("+", 500)
+	if err := a.RebuildWithInstruction(rebuilt); err != nil {
+		t.Fatalf("RebuildWithInstruction() error: %v", err)
+	}
+
+	data, err := os.ReadFile(log.Path())
+	if err != nil {
+		t.Fatalf("reading session log: %v", err)
+	}
+
+	var entries []inventoryEntry
+	for _, l := range strings.Split(string(data), "\n") {
+		if !strings.Contains(l, "context inventory:") {
+			continue
+		}
+		if e, ok := findInventoryEntry(l); ok {
+			entries = append(entries, e)
+		}
+	}
+	if len(entries) < 2 {
+		t.Fatalf("RebuildWithInstruction must write a context inventory line, got %d entries in log:\n%s", len(entries), data)
+	}
+	last := entries[len(entries)-1]
+	if last.total != len(rebuilt) {
+		t.Errorf("rebuild inventory total=%d, want %d (the rebuilt prompt)", last.total, len(rebuilt))
+	}
+	if last.base < len(rebuilt) {
+		t.Errorf("rebuild inventory base=%d, want >= %d (the rebuilt instruction)", last.base, len(rebuilt))
 	}
 }
 

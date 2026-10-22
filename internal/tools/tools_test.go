@@ -687,8 +687,11 @@ func TestTruncateLine(t *testing.T) {
 		if len(result) > maxLineLength+40 {
 			t.Errorf("expected truncation, got length %d", len(result))
 		}
-		if !strings.Contains(result, truncationMarker(len(s)-len(utf8SafeCut(s, maxLineLength)))) {
-			t.Error("expected the shared truncation marker with the cut size")
+		if !strings.Contains(result, truncationMarkerInline(len(s)-len(utf8SafeCut(s, maxLineLength)))) {
+			t.Error("expected the inline truncation marker with the cut size")
+		}
+		if strings.ContainsAny(result, "\n\r") {
+			t.Errorf("a truncated line must stay one line: %q", result[maxLineLength-10:])
 		}
 	})
 }
@@ -711,8 +714,8 @@ func TestGrepTruncatesLongLines(t *testing.T) {
 	if len(out.Matches[0].Content) > maxLineLength+40 {
 		t.Errorf("match content not truncated: length %d", len(out.Matches[0].Content))
 	}
-	if !strings.Contains(out.Matches[0].Content, truncationMarker(len(longLine)-maxLineLength)) {
-		t.Errorf("match content lacks the shared truncation marker: %q", out.Matches[0].Content[max(0, len(out.Matches[0].Content)-40):])
+	if !strings.Contains(out.Matches[0].Content, truncationMarkerInline(len(longLine)-maxLineLength)) {
+		t.Errorf("match content lacks the inline truncation marker: %q", out.Matches[0].Content[max(0, len(out.Matches[0].Content)-40):])
 	}
 }
 

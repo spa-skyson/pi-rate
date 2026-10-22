@@ -415,6 +415,12 @@ type Agent struct {
 	// only safe moment: rewriting history mid-turn would orphan a tool call
 	// from its result.
 	preTurn PreTurnHook
+
+	// warnedSkills records the skill names a missing-trigger warning has
+	// already been raised for, on this agent. Per-agent state, not a process
+	// global: two agents in one process must each warn once, and a menu
+	// rebuild (every prompt assembly) must not repeat the notice every turn.
+	warnedSkills sync.Map
 }
 
 // PreTurnHook runs before a turn is dispatched to the runner. Returning an
@@ -563,11 +569,20 @@ func New(cfg Config) (*Agent, error) {
 
 	logContextInventory(cfg.Logger, instruction, nil, cfg.Tools)
 
-	return &Agent{
+	a := &Agent{
 		runner:         r,
 		sessionService: sessionSvc,
 		config:         cfg,
-	}, nil
+	}
+	// Skill hygiene notices, deduplicated on this agent. The skill set is
+	// the same one prompt assembly loads for the working directory; loading
+	// it here is a repeat of directory reads New already pays for, and it
+	// keeps the warning state per-agent instead of per-process.
+	if cwd := cfg.workingDir(); cwd != "" {
+		a.warnSkillTriggers(loadedSkillsForDir(cwd))
+	}
+
+	return a, nil
 }
 
 // RebuildWithInstruction recreates the agent's internal runner with a new
@@ -588,6 +603,9 @@ func (a *Agent) RebuildWithInstruction(instruction string) error {
 
 	a.runner = r
 	a.config = cfg
+	// Same inventory line the other rebuild paths and New() write: a rebuilt
+	// prompt is a new context cost, and the session log must show it.
+	logContextInventory(a.config.Logger, instruction, nil, a.config.Tools)
 	return nil
 }
 
@@ -951,9 +969,10 @@ func (p InstructionParts) String() string {
 	return p.Base + p.Rules + p.Skills + p.Env
 }
 
-// maxInstructionTotal caps the assembled system prompt, in characters. The
-// 32_000 headroom sits below the gateway's silent 32KiB prefix cut: past it
-// the tail of the prompt (Env today) disappears without any signal, so an
+// maxInstructionTotal caps the assembled system prompt, in bytes — not runes;
+// len() is the contract here, aligned with the 32KiB silent-truncation points
+// that measure bytes too. The 32_000 headroom sits below the gateway's silent
+// 32KiB prefix cut: past it the tail of the prompt (Env today) disappears without any signal, so an
 // oversized prompt fails here with the per-section overruns instead. The
 // shipped prompt measures ~26.5K, leaving room for the base-prompt variants
 // to come. The per-file and per-block Rules budgets (maxRulesFileBudget /
@@ -962,11 +981,11 @@ func (p InstructionParts) String() string {
 const maxInstructionTotal = 32_000
 
 // checkInstructionTotal enforces maxInstructionTotal on the fully assembled
-// prompt. Every section that is itself over the limit is named with its size
-// — a caller fixing the prompt needs all offenders, not just the first. The
-// prompt is passed pre-assembled so the check can never drift from what the
-// model actually receives; parts carries the section sizes when the caller
-// assembled the prompt from InstructionParts, and may be nil.
+// prompt, in bytes. Every section that is itself over the limit is named with
+// its size — a caller fixing the prompt needs all offenders, not just the
+// first. The prompt is passed pre-assembled so the check can never drift from
+// what the model actually receives; parts carries the section sizes when the
+// caller assembled the prompt from InstructionParts, and may be nil.
 func checkInstructionTotal(prompt string, parts *InstructionParts) error {
 	if len(prompt) <= maxInstructionTotal {
 		return nil
@@ -986,7 +1005,7 @@ func checkInstructionTotal(prompt string, parts *InstructionParts) error {
 		{"Skills", len(known.Skills)},
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "system instruction is %d chars, over the %d char budget:", len(prompt), maxInstructionTotal)
+	fmt.Fprintf(&b, "system instruction is %d bytes, over the %d byte budget:", len(prompt), maxInstructionTotal)
 	none := true
 	for _, s := range sections {
 		if s.size > maxInstructionTotal {
@@ -1015,6 +1034,8 @@ const (
 // instructionOnlyParts recovers the Base/Rules/Skills sizes from an
 // assembled prompt by its section markers. It mirrors the composition in
 // InstructionParts.String: Base first, then Rules, then Skills, then Env.
+// The split is heuristic for an arbitrary instruction string; inventory
+// fields are approximate for non-standard prompts.
 // A section may be absent; a missing marker folds its would-be content into
 // the previous section, and only the gate and the inventory line read this —
 // the prompt itself is never reassembled from it.
@@ -1041,15 +1062,10 @@ func instructionOnlyParts(prompt string) InstructionParts {
 }
 
 // contextInventory renders the one-line inventory of the assembled prompt
-// for the session log: per-section character counts, the total, and the
-// combined size of the tool declarations registered with the model. Sizes
-// drift release over release; this line is how that drift becomes visible
-// without measuring anything by hand.
-// contextInventory renders the one-line inventory of the assembled prompt
-// for the session log: per-section character counts, the total, and the
-// combined size of the tool declarations registered with the model. Sizes
-// drift release over release; this line is how that drift becomes visible
-// without measuring anything by hand.
+// for the session log: per-section byte counts, the total, and the combined
+// size of the tool declarations registered with the model. Sizes drift
+// release over release; this line is how that drift becomes visible without
+// measuring anything by hand.
 //
 // parts.Skills spans the skills menu up to the env block (or the end of the
 // prompt), so menu= measures the menu line itself via the env marker's
@@ -1252,20 +1268,29 @@ func loadInstructionPartsFrom(baseInstruction, cwd, home string) InstructionPart
 		parts.Rules = "\n\n# Project Rules\n\n" + compactContextFiles(files)
 	}
 
-	// Get skills. Skill discovery (skillsDirs / disableLegacySkillDirs, or
-	// PI_SKILLS_DIRS / PI_DISABLE_LEGACY_SKILLS) follows the loaded config.
-	// A config load failure is not fatal here: LoadFrom still returns the
-	// merged-so-far config, and skill discovery with no skill settings is
-	// simply the default one.
-	cfg, _ := config.LoadFrom(cwd)
-	skills, err := extension.LoadSkills(extension.DefaultSkillDirsIn(cwd, cfg)...)
-	if err == nil && len(skills) > 0 {
+	if skills := loadedSkillsForDir(cwd); len(skills) > 0 {
 		parts.Skills = appendSkillsMenu(skills)
 	}
 
 	parts.Env = environmentContext(os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), cwd)
 
 	return parts
+}
+
+// loadedSkillsForDir loads the skill set prompt assembly renders for a
+// working directory. Skill discovery (skillsDirs / disableLegacySkillDirs,
+// or PI_SKILLS_DIRS / PI_DISABLE_LEGACY_SKILLS) follows the loaded config.
+// A config load failure is not fatal: LoadFrom still returns the
+// merged-so-far config, and skill discovery with no skill settings is simply
+// the default one. An unreadable skill set yields nil, never an error —
+// callers treat an empty result as "no menu".
+func loadedSkillsForDir(cwd string) []extension.Skill {
+	cfg, _ := config.LoadFrom(cwd)
+	skills, err := extension.LoadSkills(extension.DefaultSkillDirsIn(cwd, cfg)...)
+	if err != nil {
+		return nil
+	}
+	return skills
 }
 
 // maxSkillMenuDesc caps the description rendered per skill in the
@@ -1310,11 +1335,14 @@ func skillMenuDescription(desc string) string {
 // LoadSkillsWithOptions, where every consumer benefits), so the menu
 // inherits a deterministic order without this function re-sorting the
 // caller's slice behind its back.
+//
+// The formatting half of skill hygiene. The warning half lives on the agent
+// (warnSkillMissingTrigger): dedup state is per-agent, and this function has
+// no agent — it is called from prompt assembly before one exists.
 func appendSkillsMenu(skills []extension.Skill) string {
 	var b strings.Builder
 	b.WriteString("\n\n# Available Skills\n\n")
 	for _, s := range skills {
-		warnSkillMissingTrigger(s)
 		fmt.Fprintf(&b, "- /%s: %s\n", s.Name, skillMenuDescription(s.Description))
 	}
 	return b.String()
@@ -1330,22 +1358,11 @@ var skillActivationMarkers = []string{
 	"если",
 }
 
-// warnedSkills records the skill names a missing-trigger warning has already
-// been raised for this process. The menu is rebuilt on every prompt assembly,
-// so without the set a single misauthored skill would repeat its notice every
-// turn.
-var warnedSkills sync.Map
-
 // warnSkillMissingTrigger raises one notice per skill whose description has
-// no activation condition. Notices go through the notice sink (the TUI's
-// SystemNoticeCh), never to stdout/stderr — the interactive TUI owns the
-// alternate screen. The menu itself is untouched: hygiene observes, it does
-// not rewrite descriptions.
-// warnSkillMissingTrigger raises one notice per skill whose description has
-// no activation condition. Notices go through the notice sink (the TUI's
-// SystemNoticeCh), never to stdout/stderr — the interactive TUI owns the
-// alternate screen. The menu itself is untouched: hygiene observes, it does
-// not rewrite descriptions.
+// no activation condition, deduplicated on the receiving agent's warnedSkills
+// set. Notices go through the notice sink (the TUI's SystemNoticeCh), never
+// to stdout/stderr — the interactive TUI owns the alternate screen. The menu
+// itself is untouched: hygiene observes, it does not rewrite descriptions.
 //
 // The name is sanitized at the point of emission: a name comes from a
 // skill's frontmatter — files, potentially from other repos — and reaches
@@ -1355,17 +1372,28 @@ var warnedSkills sync.Map
 // the emitter is the only reliable place to strip them. The name is capped
 // at 64 runes with an ellipsis. The menu keeps the raw name: discovery reads
 // it there in context, and rewriting the menu would desync it from /skills.
-func warnSkillMissingTrigger(s extension.Skill) {
+func (a *Agent) warnSkillMissingTrigger(s extension.Skill) {
 	desc := strings.ToLower(s.Description)
 	for _, m := range skillActivationMarkers {
 		if strings.Contains(desc, m) {
 			return
 		}
 	}
-	if _, dup := warnedSkills.LoadOrStore(s.Name, struct{}{}); dup {
+	if _, dup := a.warnedSkills.LoadOrStore(s.Name, struct{}{}); dup {
 		return
 	}
 	notice.Notifyf("skill %s: в description нет условия активации — скилл может ни разу не открыться", sanitizeSkillName(s.Name))
+}
+
+// warnSkillTriggers runs the hygiene half of the skills menu over a loaded
+// skill list: one missing-trigger notice per skill, deduplicated on this
+// agent. Called from the build paths that know the skill set — New and the
+// instruction rebuilds — so the dedup state lives exactly as long as the
+// agent does, and two agents in one process each warn for themselves.
+func (a *Agent) warnSkillTriggers(skills []extension.Skill) {
+	for _, s := range skills {
+		a.warnSkillMissingTrigger(s)
+	}
 }
 
 // maxSkillNameRunes caps the sanitized name in a hygiene notice, in runes.

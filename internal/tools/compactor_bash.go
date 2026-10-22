@@ -203,7 +203,9 @@ func filterBuildOutput(s string, cfg CompactorConfig) (string, bool) {
 		result += fmt.Sprintf("\n... (%d errors shown, may have more)", errorCount)
 	}
 	if cut := len(s) - len(result); cut > 0 {
-		result += truncationMarker(cut)
+		// Minimum: downstream re-filtering (e.g. ANSI stripping) can shrink the
+		// tail further, so the folded-away size is a lower bound.
+		result += truncationMarkerMin(cut)
 	}
 	return result, true
 }
@@ -325,9 +327,10 @@ func aggregateTestOutput(s string, cfg CompactorConfig) (string, bool) {
 	if len(result) >= len(s) {
 		return s, false
 	}
-	// The summary names what it kept; the shared char marker carries the size
-	// of everything it folded away.
-	result += truncationMarker(len(s) - len(result))
+	// The summary names what it kept; the marker carries the size of
+	// everything it folded away — a lower bound, since the summary re-renders
+	// lines it chose to keep and the delta counts them as cut too.
+	result += truncationMarkerMin(len(s) - len(result))
 	return result, true
 }
 
@@ -416,7 +419,9 @@ func aggregateLinterOutput(s string, cfg CompactorConfig) (string, bool) {
 	if len(result) >= len(s) {
 		return s, false
 	}
-	result += truncationMarker(len(s) - len(result))
+	// Minimum: the summary re-renders kept lines in its own format, so the
+	// byte delta counts re-rendering as cut — a lower bound on what folded away.
+	result += truncationMarkerMin(len(s) - len(result))
 	return result, true
 }
 

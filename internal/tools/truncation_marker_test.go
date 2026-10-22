@@ -8,11 +8,23 @@ import (
 
 // The shared truncation marker: every cut that reaches the model carries
 // `… (+N bytes truncated)` with N = the number of cut bytes, so a
-// rendered artifact can never be read as the whole answer.
+// rendered artifact can never be read as the whole answer. Multi-line
+// outputs take the block form (leading newline); single-line fields take
+// the inline form (truncationMarkerInline) so the disclosure stays on the
+// line it belongs to.
 
 func TestTruncationMarkerFormat(t *testing.T) {
 	if got, want := truncationMarker(42), "\n… (+42 bytes truncated)"; got != want {
 		t.Errorf("truncationMarker(42) = %q, want %q", got, want)
+	}
+	if got, want := truncationMarkerInline(42), "… (+42 bytes truncated)"; got != want {
+		t.Errorf("truncationMarkerInline(42) = %q, want %q", got, want)
+	}
+	if strings.ContainsAny(truncationMarkerInline(1), "\n\r") {
+		t.Errorf("the inline marker must not contain line breaks: %q", truncationMarkerInline(1))
+	}
+	if got, want := truncationMarkerMin(42), "\n… (+≥42 bytes truncated)"; got != want {
+		t.Errorf("truncationMarkerMin(42) = %q, want %q", got, want)
 	}
 }
 
@@ -27,13 +39,18 @@ func TestTruncateOutputCarriesCutSize(t *testing.T) {
 	}
 }
 
-// TestTruncateLineCarriesCutSize pins the per-line clamp the grep/read tools use.
+// TestTruncateLineCarriesCutSize pins the per-line clamp the grep/read tools
+// use: the exact inline marker, no newline in the result — a GrepMatch.Content
+// is one line, and the block marker would fabricate a second.
 func TestTruncateLineCarriesCutSize(t *testing.T) {
 	s := strings.Repeat("y", maxLineLength+100)
 	got := truncateLine(s)
-	want := truncationMarker(len(s) - maxLineLength)
-	if !strings.HasSuffix(got, want) {
-		t.Errorf("truncateLine marker missing: %q", got[max(0, len(got)-60):])
+	want := truncationMarkerInline(len(s) - maxLineLength)
+	if got != strings.Repeat("y", maxLineLength)+want {
+		t.Errorf("truncateLine = kept+marker mismatch: tail %q, want suffix %q", got[max(0, len(got)-60):], want)
+	}
+	if strings.ContainsAny(got, "\n\r") {
+		t.Errorf("truncateLine output must stay a single line: %q", got[max(0, len(got)-60):])
 	}
 }
 
@@ -163,7 +180,9 @@ func TestGroupSearchOutputCarriesMarker(t *testing.T) {
 }
 
 // TestTreeHandlerCarriesMarker runs the tree tool over a directory big enough
-// to cross the entry cap and requires the marker on the listing.
+// to cross the entry cap and requires the marker on the listing. The cap
+// measures only the current level's entry names — skipped subtrees were never
+// walked — so the marker must state a lower bound, not an exact count.
 func TestTreeHandlerCarriesMarker(t *testing.T) {
 	dir := t.TempDir()
 	sb := testSandbox(t, dir)
@@ -180,10 +199,20 @@ func TestTreeHandlerCarriesMarker(t *testing.T) {
 	if !strings.Contains(out.Tree, "bytes truncated)") {
 		t.Errorf("tree listing lacks the shared marker: %q", out.Tree[max(0, len(out.Tree)-80):])
 	}
+	if !strings.Contains(out.Tree, truncationMarkerMinPrefix()) {
+		t.Errorf("tree entry-cap marker must carry ≥ (an estimate): %q", out.Tree[max(0, len(out.Tree)-80):])
+	}
+}
+
+// truncationMarkerMinPrefix is the ≥ shape aggregators must carry, matched
+// without a number so the exact estimate can drift with the config.
+func truncationMarkerMinPrefix() string {
+	return "(+≥"
 }
 
 // TestFilterBuildOutputCarriesMarker covers the build filter's cap path: an
-// input with more errors than the cap must end in the shared marker.
+// input with more errors than the cap must end in the shared marker. The
+// filter's cut is an aggregate delta, so it must state a lower bound.
 func TestFilterBuildOutputCarriesMarker(t *testing.T) {
 	cfg := DefaultCompactorConfig()
 	cfg.MaxBuildErrors = 2
@@ -198,6 +227,9 @@ func TestFilterBuildOutputCarriesMarker(t *testing.T) {
 	}
 	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("build filter output lacks the shared marker: %q", got[len(got)-80:])
+	}
+	if !strings.Contains(got, truncationMarkerMinPrefix()) {
+		t.Errorf("aggregated cut must carry ≥ (a lower bound): %q", got[len(got)-80:])
 	}
 }
 
@@ -217,6 +249,9 @@ func TestAggregateTestOutputCarriesMarker(t *testing.T) {
 	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("test summary lacks the shared marker: %q", got[len(got)-80:])
 	}
+	if !strings.Contains(got, truncationMarkerMinPrefix()) {
+		t.Errorf("aggregated cut must carry ≥ (a lower bound): %q", got[len(got)-80:])
+	}
 }
 
 // TestAggregateLinterOutputCarriesMarker covers the linter aggregation path.
@@ -235,5 +270,71 @@ func TestAggregateLinterOutputCarriesMarker(t *testing.T) {
 	}
 	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("linter summary lacks the shared marker: %q", got[len(got)-80:])
+	}
+	if !strings.Contains(got, truncationMarkerMinPrefix()) {
+		t.Errorf("aggregated cut must carry ≥ (a lower bound): %q", got[len(got)-80:])
+	}
+}
+
+// TestGroupSearchOutputCarriesMinMarker covers the search grouping cap: the
+// grouped form re-renders the lines it kept, so its cut marker must state a
+// lower bound rather than an exact byte count.
+func TestGroupSearchOutputCarriesMinMarker(t *testing.T) {
+	cfg := DefaultCompactorConfig()
+	var lines []string
+	for i := range 200 {
+		lines = append(lines, fmt.Sprintf("big.go:%d:some match content here that is long enough", i))
+	}
+	s := strings.Join(lines, "\n")
+	got, applied := groupSearchOutput(s, cfg)
+	if !applied {
+		t.Fatal("groupSearchOutput did not apply")
+	}
+	if !strings.Contains(got, truncationMarkerMinPrefix()) {
+		t.Errorf("grouped search cut must carry ≥ (a lower bound): %q", got[len(got)-80:])
+	}
+}
+
+// TestCompactGitDiffTextMarkerIsExact pins the diff compactor's byte marker
+// to the true remainder after the fix for slicing the source by the emitted
+// count: hunk lines past the hunk cap are consumed but not emitted, so
+// slicing by totalLines re-attributed already-consumed lines to the omitted
+// tail and inflated the marker (318 vs the true 296 in the golden).
+func TestCompactGitDiffTextMarkerIsExact(t *testing.T) {
+	cfg := DefaultCompactorConfig()
+	cfg.MaxDiffLines = 4
+	cfg.MaxDiffHunkLines = 2
+	var lines []string
+	lines = append(lines,
+		"diff --git a/big.go b/big.go",
+		"--- a/big.go",
+		"+++ b/big.go",
+		"@@ -1,9 +1,9 @@",
+	)
+	for range 60 {
+		lines = append(lines, "+added line number "+strings.Repeat("n", 20))
+	}
+	s := strings.Join(lines, "\n")
+	got, applied := compactGitDiffText(s, cfg)
+	if !applied {
+		t.Fatal("compactGitDiffText did not apply")
+	}
+
+	// Recompute the exact remainder independently: everything after the last
+	// emitted line of output minus the marker lines the summary itself adds.
+	// The kept head is 4 emitted lines; the cut disclosure names what remains.
+	kept := strings.Join(lines[:4], "\n") + "\n"
+	i := strings.Index(got, "\n... (")
+	if i < 0 {
+		t.Fatalf("no omission summary in output: %q", got[len(got)-120:])
+	}
+	body := got[:i]
+	if body != kept {
+		t.Fatalf("kept head mismatch:\n got %q\nwant %q", body, kept)
+	}
+	omittedLines := lines[4:]
+	want := truncationMarker(len(strings.Join(omittedLines, "\n")))
+	if !strings.Contains(got, want) {
+		t.Errorf("marker must name exactly %d cut bytes: %q", len(s)-len(kept), got[len(got)-80:])
 	}
 }

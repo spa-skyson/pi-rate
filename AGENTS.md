@@ -513,10 +513,10 @@ should load on demand. Conventions that keep it that way:
   menu build (`warnSkillMissingTrigger`, `internal/agent/agent.go`): without
   a stated trigger the skill can sit in the menu unopened forever.
 - **Every cut of tool output carries the shared marker
-  `… (+N chars truncated)`** — N = characters cut
+  `… (+N bytes truncated)`** — N = bytes cut
   (`truncationMarker`, `internal/tools/truncate.go`). One shape everywhere,
   so the model never mistakes a rendering artifact for the whole answer.
-- **The assembled always-on block is gated at 32 000 chars**
+- **The assembled always-on block is gated at 32,000 bytes**
   (`maxInstructionTotal`, `internal/agent/agent.go`). Past the budget agent
   assembly fails naming every overrunning section — keep the sum under it;
   the per-block Rules budgets alone do not guarantee that.
