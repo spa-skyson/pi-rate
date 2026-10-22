@@ -139,6 +139,10 @@ Rebuild and reinstall the pi binary from source, then restart.
 | `description` | Yes | One-line description shown in `/skills` list |
 | `tools` | No | Comma-separated tool allowlist for this skill |
 
+Every `description` must state the skill's activation condition — a "use when …" phrase. The description line is the only cue the agent has to open the skill; without a stated trigger the skill can sit in the menu unopened forever, and the menu build warns about it.
+
+When choosing how to teach the agent a workflow, prefer the cheapest form that does the job: **skill by trigger > script > subagent > always-on prose** in `AGENTS.md`. A skill's trigger line costs one line per request while its body is read only when triggered; always-on prose is paid in full on every request and is the last resort.
+
 ### Discovery Order (lowest → highest priority)
 
 1. **Bundled** — compiled into the `pi` binary (`internal/extension/bundled_skills/`)

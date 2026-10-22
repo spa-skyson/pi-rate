@@ -499,6 +499,28 @@ When in doubt, grep for `Printf|Println|os.Stdout|os.Stderr|stdlog` in the
 package you are touching and confirm every hit is either outside the TUI path
 or routed through the session logger.
 
+## Prompt budget conventions
+
+The always-on system block is paid for on every request; everything else
+should load on demand. Conventions that keep it that way:
+
+- **Prefer the cheapest form that does the job: skill by trigger > script >
+  subagent > always-on prose.** A skill's trigger line costs one line per
+  request; its body is read only when triggered. Always-on prose is the
+  expensive last resort — anything added there must be subtracted elsewhere.
+- **Every skill `description` states its activation condition** (a
+  "use when …" style phrase). A description carrying none earns a warning at
+  menu build (`warnSkillMissingTrigger`, `internal/agent/agent.go`): without
+  a stated trigger the skill can sit in the menu unopened forever.
+- **Every cut of tool output carries the shared marker
+  `… (+N chars truncated)`** — N = characters cut
+  (`truncationMarker`, `internal/tools/truncate.go`). One shape everywhere,
+  so the model never mistakes a rendering artifact for the whole answer.
+- **The assembled always-on block is gated at 32 000 chars**
+  (`maxInstructionTotal`, `internal/agent/agent.go`). Past the budget agent
+  assembly fails naming every overrunning section — keep the sum under it;
+  the per-block Rules budgets alone do not guarantee that.
+
 ## Tool-output compaction: one route per tool, and write what you read
 
 `internal/tools/compactor*.go` shrinks tool results before they reach the model.
