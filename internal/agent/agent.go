@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	adkagent "google.golang.org/adk/v2/agent"
@@ -27,6 +29,7 @@ import (
 	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/extension"
 	"github.com/spa-skyson/pi-rate/internal/logger"
+	"github.com/spa-skyson/pi-rate/internal/notice"
 	pisession "github.com/spa-skyson/pi-rate/internal/session"
 )
 
@@ -500,6 +503,9 @@ func injectWithFailOpen(ctx adkagent.ReadonlyContext, template string, log *logg
 }
 
 func buildRunner(cfg Config, instruction string, sessionSvc session.Service) (*runner.Runner, error) {
+	if err := checkInstructionTotal(instruction, nil); err != nil {
+		return nil, err
+	}
 	name := cfg.Name
 	if name == "" {
 		name = AgentName
@@ -555,6 +561,8 @@ func New(cfg Config) (*Agent, error) {
 		return nil, err
 	}
 
+	logContextInventory(cfg.Logger, instruction, nil, cfg.Tools)
+
 	return &Agent{
 		runner:         r,
 		sessionService: sessionSvc,
@@ -606,6 +614,7 @@ func (a *Agent) RebuildWithModel(llm model.LLM) error {
 
 	a.runner = r
 	a.config = cfg
+	logContextInventory(a.config.Logger, instruction, nil, a.config.Tools)
 	return nil
 }
 
@@ -641,6 +650,7 @@ func (a *Agent) RebuildWithSession(agentName, instruction string, llm model.LLM,
 
 	a.runner = r
 	a.config = cfg
+	logContextInventory(a.config.Logger, instruction, nil, a.config.Tools)
 	return nil
 }
 
@@ -941,6 +951,146 @@ func (p InstructionParts) String() string {
 	return p.Base + p.Rules + p.Skills + p.Env
 }
 
+// maxInstructionTotal caps the assembled system prompt, in characters. The
+// 32_000 headroom sits below the gateway's silent 32KiB prefix cut: past it
+// the tail of the prompt (Env today) disappears without any signal, so an
+// oversized prompt fails here with the per-section overruns instead. The
+// shipped prompt measures ~26.5K, leaving room for the base-prompt variants
+// to come. The per-file and per-block Rules budgets (maxRulesFileBudget /
+// maxRulesBlock) stay in charge of keeping Rules itself bounded; this is the
+// always-on backstop for the sum.
+const maxInstructionTotal = 32_000
+
+// checkInstructionTotal enforces maxInstructionTotal on the fully assembled
+// prompt. Every section that is itself over the limit is named with its size
+// — a caller fixing the prompt needs all offenders, not just the first. The
+// prompt is passed pre-assembled so the check can never drift from what the
+// model actually receives; parts carries the section sizes when the caller
+// assembled the prompt from InstructionParts, and may be nil.
+func checkInstructionTotal(prompt string, parts *InstructionParts) error {
+	if len(prompt) <= maxInstructionTotal {
+		return nil
+	}
+	known := parts
+	if known == nil {
+		resolved := instructionOnlyParts(prompt)
+		known = &resolved
+	}
+	type section struct {
+		name string
+		size int
+	}
+	sections := []section{
+		{"Base", len(known.Base)},
+		{"Rules", len(known.Rules)},
+		{"Skills", len(known.Skills)},
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "system instruction is %d chars, over the %d char budget:", len(prompt), maxInstructionTotal)
+	none := true
+	for _, s := range sections {
+		if s.size > maxInstructionTotal {
+			fmt.Fprintf(&b, " %s=%d", s.name, s.size)
+			none = false
+		}
+	}
+	if none {
+		b.WriteString(" no single section exceeds the budget; the total is spread across Base+Rules+Skills+Env")
+	}
+	return fmt.Errorf("%s", b.String())
+}
+
+// Section markers the assembler writes into the prompt. They double as the
+// only way to recover per-section sizes from an already-assembled prompt
+// string, which callers that hand the agent a plain instruction (a SOP, a
+// --system override) need.
+const (
+	rulesSectionMarker  = "\n\n# Project Rules\n\n"
+	skillsSectionMarker = "\n\n# Available Skills\n\n"
+)
+
+// instructionOnlyParts recovers the Base/Rules/Skills sizes from an
+// assembled prompt by its section markers. It mirrors the composition in
+// InstructionParts.String: Base first, then Rules, then Skills, then Env.
+// A section may be absent; a missing marker folds its would-be content into
+// the previous section, and only the gate and the inventory line read this —
+// the prompt itself is never reassembled from it.
+func instructionOnlyParts(prompt string) InstructionParts {
+	var parts InstructionParts
+	rest := prompt
+	if i := strings.Index(rest, rulesSectionMarker); i >= 0 {
+		parts.Base = rest[:i]
+		rest = rest[i:]
+	} else {
+		parts.Base = rest
+		return parts
+	}
+	if j := strings.Index(rest, skillsSectionMarker); j >= 0 {
+		parts.Rules = rest[:j]
+		// Everything from the skills marker on — including a trailing Env
+		// block — stays unattributed for the gate's purposes; the total in
+		// the error message already names the real overage.
+		parts.Skills = rest[j:]
+		return parts
+	}
+	parts.Rules = rest
+	return parts
+}
+
+// contextInventory renders the one-line inventory of the assembled prompt
+// for the session log: per-section character counts, the total, and the
+// combined size of the tool declarations registered with the model. Sizes
+// drift release over release; this line is how that drift becomes visible
+// without measuring anything by hand.
+func contextInventory(parts InstructionParts, prompt string, toolsChars int) string {
+	return fmt.Sprintf(
+		"context inventory: base=%d rules=%d skills=%d menu=%d total=%d tools=%d",
+		len(parts.Base), len(parts.Rules), len(parts.Skills), len(parts.Skills), len(prompt), toolsChars)
+}
+
+// logContextInventory writes the context inventory line to the session log
+// after an agent (re)build. parts may be nil: a prompt the caller handed over
+// as a plain string is inventoried by its section markers. The logger is
+// nil-safe — without one the line is dropped, never printed to the terminal.
+func logContextInventory(log *logger.Logger, prompt string, parts *InstructionParts, tools []tool.Tool) {
+	if log == nil {
+		return
+	}
+	var resolved InstructionParts
+	if parts != nil {
+		resolved = *parts
+	} else {
+		resolved = instructionOnlyParts(prompt)
+	}
+	log.Info(contextInventory(resolved, prompt, declaredToolChars(tools)))
+}
+
+// declaredToolChars sums the serialized model-facing declarations of the
+// given tools — the same measurement the TUI context gauge reports, so the
+// session log and the gauge cannot disagree.
+func declaredToolChars(tools []tool.Tool) int {
+	total := 0
+	for _, t := range tools {
+		type declarer interface {
+			Declaration() *genai.FunctionDeclaration
+		}
+		d, ok := t.(declarer)
+		if !ok {
+			continue
+		}
+		decl := d.Declaration()
+		if decl == nil {
+			continue
+		}
+		enc, err := json.Marshal(decl)
+		if err != nil {
+			continue
+		}
+		total += len(enc)
+	}
+	return total
+}
+
 // loadInstructionFrom is the testable core of LoadInstruction, resolving
 // context files and skills relative to explicit cwd and home directories.
 func loadInstructionFrom(baseInstruction, cwd, home string) string {
@@ -1146,9 +1296,44 @@ func appendSkillsMenu(skills []extension.Skill) string {
 	var b strings.Builder
 	b.WriteString("\n\n# Available Skills\n\n")
 	for _, s := range skills {
+		warnSkillMissingTrigger(s)
 		fmt.Fprintf(&b, "- /%s: %s\n", s.Name, skillMenuDescription(s.Description))
 	}
 	return b.String()
+}
+
+// skillActivationMarkers are the phrases a skill description uses to state
+// when the skill applies. A description carrying none of them gives the model
+// no cue to open the skill, so it can sit in the menu forever.
+var skillActivationMarkers = []string{
+	"use when",
+	"when to use",
+	"используй когда",
+	"если",
+}
+
+// warnedSkills records the skill names a missing-trigger warning has already
+// been raised for this process. The menu is rebuilt on every prompt assembly,
+// so without the set a single misauthored skill would repeat its notice every
+// turn.
+var warnedSkills sync.Map
+
+// warnSkillMissingTrigger raises one notice per skill whose description has
+// no activation condition. Notices go through the notice sink (the TUI's
+// SystemNoticeCh), never to stdout/stderr — the interactive TUI owns the
+// alternate screen. The menu itself is untouched: hygiene observes, it does
+// not rewrite descriptions.
+func warnSkillMissingTrigger(s extension.Skill) {
+	desc := strings.ToLower(s.Description)
+	for _, m := range skillActivationMarkers {
+		if strings.Contains(desc, m) {
+			return
+		}
+	}
+	if _, dup := warnedSkills.LoadOrStore(s.Name, struct{}{}); dup {
+		return
+	}
+	notice.Notifyf("skill %s: в description нет условия активации — скилл может ни разу не открыться", s.Name)
 }
 
 // AppendActiveSkill returns prompt with an "# Active Skill" section appended
