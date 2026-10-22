@@ -11,14 +11,21 @@ const (
 )
 
 // truncationMarker is the single cut disclosure every truncation point in
-// this package appends: `… (+N chars truncated)`, N = the number of cut
+// this package appends: `… (+N bytes truncated)`, N = the number of cut
 // characters. One shape everywhere means the model never has to guess
 // whether a tail is an artifact of rendering or the whole answer. Points
 // that stop before reading the tail (a streaming read, an entry cap) use the
 // same frame with the unit they actually counted; they cannot know the
 // character count without doing the reading they exist to avoid.
+// truncationMarker is the single cut disclosure every truncation point in
+// this package appends: `… (+N bytes truncated)`, N = the number of cut
+// bytes. One shape everywhere means the model never has to guess
+// whether a tail is an artifact of rendering or the whole answer. Points
+// that stop before reading the tail (a streaming read, an entry cap) use the
+// same frame with their own minimal estimate; they cannot know the byte
+// count without doing the reading they exist to avoid.
 func truncationMarker(cut int) string {
-	return fmt.Sprintf("\n… (+%d chars truncated)", cut)
+	return fmt.Sprintf("\n… (+%d bytes truncated)", cut)
 }
 
 // utf8SafeCut returns s truncated to at most n bytes, backing up to the
@@ -63,7 +70,8 @@ func truncateOutput(s string) string {
 	return cut + truncationMarker(len(s)-len(cut))
 }
 
-// truncateLine trims a single line to maxLineLength characters.
+// truncateLine trims a single line to maxLineLength bytes, backing up to a
+// rune boundary so the kept prefix is never invalid UTF-8.
 func truncateLine(s string) string {
 	if len(s) <= maxLineLength {
 		return s

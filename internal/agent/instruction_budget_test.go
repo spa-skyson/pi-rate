@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -193,6 +194,79 @@ func TestSkillTriggerHygiene(t *testing.T) {
 	}
 }
 
+// TestSanitizedSkillNameInNotice feeds a skill whose name carries an ESC/OSC
+// escape sequence and is longer than 64 runes, and asserts the notice carries
+// a clean, length-capped name while a valid name passes through unchanged.
+func TestSanitizedSkillNameInNotice(t *testing.T) {
+	resetWarnedSkills(t)
+	notices := collectNotices(t)
+
+	// ESC survives the audit scanner's ASCII fast path; the ']' OSC payload
+	// is ASCII and by design stays in the menu name, so the notice test
+	// keys on the sanitized remainder of the name.
+	dirty := "\x1b]2;pwned\x07evil-\x1b[31mred\n\r\tname"
+	appendSkillsMenu([]extension.Skill{{Name: dirty, Description: "No trigger here."}})
+
+	raised := notices()
+	if len(raised) != 1 {
+		t.Fatalf("got %d notices, want 1: %q", len(raised), raised)
+	}
+	got := raised[0]
+	if strings.ContainsAny(got, "\x1b\x07\n\r\t") {
+		t.Errorf("notice carries control characters: %q", got)
+	}
+	for _, r := range got {
+		if r <= 0x1F || (r >= 0x7F && r <= 0x9F) {
+			t.Errorf("notice carries control rune %q: %q", r, got)
+		}
+	}
+	if !strings.Contains(got, "skill ]2;pwnedevil-[31mredname:") {
+		t.Errorf("sanitized name missing from notice: %q", got)
+	}
+
+	// A name with nothing to strip passes through byte-for-byte.
+	// A name with nothing to strip passes through byte-for-byte. The dirty
+	// notice stays in the recorder (dedup is by raw name), so read the last
+	// one — the second appendSkillsMenu raised exactly one more.
+	resetWarnedSkills(t)
+	const plain = "perfectly-fine-skill"
+	appendSkillsMenu([]extension.Skill{{Name: plain, Description: "No trigger here either."}})
+	raised = notices()
+	if n := len(raised); n != 2 || !strings.Contains(raised[n-1], "skill "+plain+":") {
+		t.Errorf("valid name mangled: %q", raised)
+	}
+}
+
+// TestLongSkillNameTruncatedInNotice caps a long name at maxSkillNameRunes
+// runes with an ellipsis, so one giant frontmatter name cannot flood the
+// notice area.
+func TestLongSkillNameTruncatedInNotice(t *testing.T) {
+	resetWarnedSkills(t)
+	notices := collectNotices(t)
+
+	appendSkillsMenu([]extension.Skill{{
+		Name:        strings.Repeat("ы", maxSkillNameRunes+20),
+		Description: "No trigger here.",
+	}})
+
+	raised := notices()
+	if len(raised) != 1 {
+		t.Fatalf("got %d notices, want 1: %q", len(raised), raised)
+	}
+	prefix := "skill "
+	suffix := ": в description нет условия активации"
+	i := strings.Index(raised[0], prefix) + len(prefix)
+	j := strings.Index(raised[0], suffix)
+	if j < 0 {
+		t.Fatalf("unexpected notice shape: %q", raised[0])
+	}
+	name := raised[0][i:j]
+	runes := []rune(name)
+	if len(runes) != maxSkillNameRunes+1 || !strings.HasSuffix(name, "…") {
+		t.Errorf("name not capped at %d runes + ellipsis: %d runes, %q", maxSkillNameRunes, len(runes), name)
+	}
+}
+
 // TestRussianTriggerMarkers accepts the Russian activation markers the same
 // way: a description that only says "используй когда" or "если" is fine.
 func TestRussianTriggerMarkers(t *testing.T) {
@@ -222,13 +296,26 @@ func countMsgs(ss []string, sub string) int {
 }
 
 // TestContextInventoryFormat pins the line format, so a consumer can grep it
-// without parsing JSON.
+// without parsing JSON. menu= measures the skills menu line itself — the
+// skills span up to the env block — while skills= stays the raw span.
 func TestContextInventoryFormat(t *testing.T) {
-	parts := InstructionParts{Base: "12345", Rules: "678", Skills: "90"}
-	got := contextInventory(parts, parts.String(), 42)
-	want := "context inventory: base=5 rules=3 skills=2 menu=2 total=10 tools=42"
+	parts := InstructionParts{
+		Base:   "12345",
+		Rules:  "678",
+		Skills: "90",
+		Env:    environmentContext("/home/test", "test", "/w", "", "/w"),
+	}
+	prompt := parts.String()
+	got := contextInventory(parts, prompt, 42)
+	menu := len(parts.Skills)
+	want := fmt.Sprintf(
+		"context inventory: base=5 rules=3 skills=2 menu=%d total=%d tools=42",
+		menu, len(prompt))
 	if got != want {
 		t.Errorf("contextInventory = %q, want %q", got, want)
+	}
+	if !strings.Contains(got, " menu=") {
+		t.Errorf("inventory lost the menu field: %q", got)
 	}
 }
 

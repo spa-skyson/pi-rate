@@ -79,7 +79,7 @@ func TestCogBGroupSearchOutputGolden(t *testing.T) {
 			total:  100,
 			per:    20,
 			wantOK: true,
-			want:   "file0.go (10 matches):\n  0:some match text here\n  3:some match text here\n  6:some match text here\n  9:some match text here\n  12:some match text here\n  15:some match text here\n  18:some match text here\n  21:some match text here\n  24:some match text here\n  27:some match text here\nfile1.go (10 matches):\n  1:some match text here\n  4:some match text here\n  7:some match text here\n  10:some match text here\n  13:some match text here\n  16:some match text here\n  19:some match text here\n  22:some match text here\n  25:some match text here\n  28:some match text here\nfile2.go (10 matches):\n  2:some match text here\n  5:some match text here\n  8:some match text here\n  11:some match text here\n  14:some match text here\n  17:some match text here\n  20:some match text here\n  23:some match text here\n  26:some match text here\n  29:some match text here\n\n… (+140 chars truncated)",
+			want:   "file0.go (10 matches):\n  0:some match text here\n  3:some match text here\n  6:some match text here\n  9:some match text here\n  12:some match text here\n  15:some match text here\n  18:some match text here\n  21:some match text here\n  24:some match text here\n  27:some match text here\nfile1.go (10 matches):\n  1:some match text here\n  4:some match text here\n  7:some match text here\n  10:some match text here\n  13:some match text here\n  16:some match text here\n  19:some match text here\n  22:some match text here\n  25:some match text here\n  28:some match text here\nfile2.go (10 matches):\n  2:some match text here\n  5:some match text here\n  8:some match text here\n  11:some match text here\n  14:some match text here\n  17:some match text here\n  20:some match text here\n  23:some match text here\n  26:some match text here\n  29:some match text here\n\n… (+140 bytes truncated)",
 		},
 		{
 			name:   "perfile",
@@ -87,7 +87,7 @@ func TestCogBGroupSearchOutputGolden(t *testing.T) {
 			total:  100,
 			per:    3,
 			wantOK: true,
-			want:   "f0.go (15 matches):\n  0:xx\n  2:xx\n  4:xx\n  ... and 12 more matches\nf1.go (15 matches):\n  1:xx\n  3:xx\n  5:xx\n  ... and 12 more matches\n\n… (+215 chars truncated)",
+			want:   "f0.go (15 matches):\n  0:xx\n  2:xx\n  4:xx\n  ... and 12 more matches\nf1.go (15 matches):\n  1:xx\n  3:xx\n  5:xx\n  ... and 12 more matches\n\n… (+215 bytes truncated)",
 		},
 		{
 			name:   "total",
@@ -95,7 +95,7 @@ func TestCogBGroupSearchOutputGolden(t *testing.T) {
 			total:  5,
 			per:    3,
 			wantOK: true,
-			want:   "f0.go (10 matches):\n  0:yy\n  4:yy\n  8:yy\n  ... and 7 more matches\nf1.go (10 matches):\n  1:yy\n  5:yy\n\n... (5 total matches shown, limited to 5)\n\n\u2026 (+326 chars truncated)",
+			want:   "f0.go (10 matches):\n  0:yy\n  4:yy\n  8:yy\n  ... and 7 more matches\nf1.go (10 matches):\n  1:yy\n  5:yy\n\n... (5 total matches shown, limited to 5)\n\n\u2026 (+326 bytes truncated)",
 		},
 		{
 			name:   "totalzero",
@@ -103,7 +103,7 @@ func TestCogBGroupSearchOutputGolden(t *testing.T) {
 			total:  0,
 			per:    3,
 			wantOK: true,
-			want:   "z.go (25 matches):\n\n... (0 total matches shown, limited to 0)\n\n\u2026 (+177 chars truncated)",
+			want:   "z.go (25 matches):\n\n... (0 total matches shown, limited to 0)\n\n\u2026 (+177 bytes truncated)",
 		},
 		{
 			name:   "blanks",
@@ -111,7 +111,7 @@ func TestCogBGroupSearchOutputGolden(t *testing.T) {
 			total:  100,
 			per:    20,
 			wantOK: true,
-			want:   "b.go (12 matches):\n  1:v\n  3:v\n  5:v\n  7:v\n  9:v\n  11:v\n  13:v\n  15:v\n  17:v\n  19:v\n  21:v\n  23:v\n\n\u2026 (+29 chars truncated)",
+			want:   "b.go (12 matches):\n  1:v\n  3:v\n  5:v\n  7:v\n  9:v\n  11:v\n  13:v\n  15:v\n  17:v\n  19:v\n  21:v\n  23:v\n\n\u2026 (+29 bytes truncated)",
 		},
 		{
 			name:   "nolinenum",
@@ -119,7 +119,7 @@ func TestCogBGroupSearchOutputGolden(t *testing.T) {
 			total:  100,
 			per:    20,
 			wantOK: true,
-			want:   "c.go (22 matches):\n  content 0\n  content 1\n  content 2\n  content 3\n  content 4\n  content 5\n  content 6\n  content 7\n  content 8\n  content 9\n  content 10\n  content 11\n  content 12\n  content 13\n  content 14\n  content 15\n  content 16\n  content 17\n  content 18\n  content 19\n  ... and 2 more matches\n\n\u2026 (+47 chars truncated)",
+			want:   "c.go (22 matches):\n  content 0\n  content 1\n  content 2\n  content 3\n  content 4\n  content 5\n  content 6\n  content 7\n  content 8\n  content 9\n  content 10\n  content 11\n  content 12\n  content 13\n  content 14\n  content 15\n  content 16\n  content 17\n  content 18\n  content 19\n  ... and 2 more matches\n\n\u2026 (+47 bytes truncated)",
 		},
 		{
 			name:   "grows",
@@ -127,7 +127,7 @@ func TestCogBGroupSearchOutputGolden(t *testing.T) {
 			total:  100,
 			per:    20,
 			wantOK: true,
-			want:   "d.go (21 matches):\n  0:\n  1:\n  2:\n  3:\n  4:\n  5:\n  6:\n  7:\n  8:\n  9:\n  10:\n  11:\n  12:\n  13:\n  14:\n  15:\n  16:\n  17:\n  18:\n  19:\n  ... and 1 more matches\n\n\u2026 (+24 chars truncated)",
+			want:   "d.go (21 matches):\n  0:\n  1:\n  2:\n  3:\n  4:\n  5:\n  6:\n  7:\n  8:\n  9:\n  10:\n  11:\n  12:\n  13:\n  14:\n  15:\n  16:\n  17:\n  18:\n  19:\n  ... and 1 more matches\n\n\u2026 (+24 bytes truncated)",
 		},
 		{
 			name:   "onematch",

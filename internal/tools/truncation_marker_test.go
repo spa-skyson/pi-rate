@@ -7,11 +7,11 @@ import (
 )
 
 // The shared truncation marker: every cut that reaches the model carries
-// `… (+N chars truncated)` with N = the number of cut characters, so a
+// `… (+N bytes truncated)` with N = the number of cut bytes, so a
 // rendered artifact can never be read as the whole answer.
 
 func TestTruncationMarkerFormat(t *testing.T) {
-	if got, want := truncationMarker(42), "\n… (+42 chars truncated)"; got != want {
+	if got, want := truncationMarker(42), "\n… (+42 bytes truncated)"; got != want {
 		t.Errorf("truncationMarker(42) = %q, want %q", got, want)
 	}
 }
@@ -82,7 +82,7 @@ func TestSmartTruncateCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("smartTruncate did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("smartTruncate output lacks the shared marker: %q", got[len(got)-60:])
 	}
 }
@@ -102,7 +102,7 @@ func TestCompactGitDiffTextCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("compactGitDiffText did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("git diff compaction lacks the shared marker: %q", got[len(got)-80:])
 	}
 }
@@ -122,7 +122,7 @@ func TestCompactGitLogTextCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("compactGitLogText did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("git log compaction lacks the shared marker: %q", got[len(got)-80:])
 	}
 }
@@ -140,7 +140,7 @@ func TestCompactGitStatusTextCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("compactGitStatusText did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("git status compaction lacks the shared marker: %q", got[len(got)-80:])
 	}
 }
@@ -157,7 +157,7 @@ func TestGroupSearchOutputCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("groupSearchOutput did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("grouped search output lacks the shared marker: %q", got[len(got)-80:])
 	}
 }
@@ -177,7 +177,7 @@ func TestTreeHandlerCarriesMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Tree, "chars truncated)") {
+	if !strings.Contains(out.Tree, "bytes truncated)") {
 		t.Errorf("tree listing lacks the shared marker: %q", out.Tree[max(0, len(out.Tree)-80):])
 	}
 }
@@ -196,7 +196,7 @@ func TestFilterBuildOutputCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("filterBuildOutput did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("build filter output lacks the shared marker: %q", got[len(got)-80:])
 	}
 }
@@ -214,7 +214,7 @@ func TestAggregateTestOutputCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("aggregateTestOutput did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("test summary lacks the shared marker: %q", got[len(got)-80:])
 	}
 }
@@ -233,7 +233,7 @@ func TestAggregateLinterOutputCarriesMarker(t *testing.T) {
 	if !applied {
 		t.Fatal("aggregateLinterOutput did not apply")
 	}
-	if !strings.Contains(got, "chars truncated)") {
+	if !strings.Contains(got, "bytes truncated)") {
 		t.Errorf("linter summary lacks the shared marker: %q", got[len(got)-80:])
 	}
 }

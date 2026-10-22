@@ -1007,6 +1007,9 @@ func checkInstructionTotal(prompt string, parts *InstructionParts) error {
 const (
 	rulesSectionMarker  = "\n\n# Project Rules\n\n"
 	skillsSectionMarker = "\n\n# Available Skills\n\n"
+	// envSectionMarker opens the volatile environment block that closes the
+	// prompt; the inventory line measures the skills menu up to it.
+	envSectionMarker = "\n\n# Runtime Environment\n\n"
 )
 
 // instructionOnlyParts recovers the Base/Rules/Skills sizes from an
@@ -1042,10 +1045,25 @@ func instructionOnlyParts(prompt string) InstructionParts {
 // combined size of the tool declarations registered with the model. Sizes
 // drift release over release; this line is how that drift becomes visible
 // without measuring anything by hand.
+// contextInventory renders the one-line inventory of the assembled prompt
+// for the session log: per-section character counts, the total, and the
+// combined size of the tool declarations registered with the model. Sizes
+// drift release over release; this line is how that drift becomes visible
+// without measuring anything by hand.
+//
+// parts.Skills spans the skills menu up to the env block (or the end of the
+// prompt), so menu= measures the menu line itself via the env marker's
+// offset; without a trailing env block the menu runs to the end of the
+// prompt. The skills= number beside it stays the raw span, so a drift
+// between the two points at a tail that has grown onto the skills section.
 func contextInventory(parts InstructionParts, prompt string, toolsChars int) string {
+	menu := len(parts.Skills)
+	if i := strings.Index(prompt, envSectionMarker); i >= 0 {
+		menu = i - len(parts.Base) - len(parts.Rules)
+	}
 	return fmt.Sprintf(
 		"context inventory: base=%d rules=%d skills=%d menu=%d total=%d tools=%d",
-		len(parts.Base), len(parts.Rules), len(parts.Skills), len(parts.Skills), len(prompt), toolsChars)
+		len(parts.Base), len(parts.Rules), len(parts.Skills), menu, len(prompt), toolsChars)
 }
 
 // logContextInventory writes the context inventory line to the session log
@@ -1323,6 +1341,20 @@ var warnedSkills sync.Map
 // SystemNoticeCh), never to stdout/stderr — the interactive TUI owns the
 // alternate screen. The menu itself is untouched: hygiene observes, it does
 // not rewrite descriptions.
+// warnSkillMissingTrigger raises one notice per skill whose description has
+// no activation condition. Notices go through the notice sink (the TUI's
+// SystemNoticeCh), never to stdout/stderr — the interactive TUI owns the
+// alternate screen. The menu itself is untouched: hygiene observes, it does
+// not rewrite descriptions.
+//
+// The name is sanitized at the point of emission: a name comes from a
+// skill's frontmatter — files, potentially from other repos — and reaches
+// the terminal through the notice path. Control characters (C0/C1, including
+// ESC and BEL) are dropped, so an escape sequence in `name:` cannot repaint
+// the user's screen; the audit scanner's ASCII fast path cannot see them, so
+// the emitter is the only reliable place to strip them. The name is capped
+// at 64 runes with an ellipsis. The menu keeps the raw name: discovery reads
+// it there in context, and rewriting the menu would desync it from /skills.
 func warnSkillMissingTrigger(s extension.Skill) {
 	desc := strings.ToLower(s.Description)
 	for _, m := range skillActivationMarkers {
@@ -1333,7 +1365,28 @@ func warnSkillMissingTrigger(s extension.Skill) {
 	if _, dup := warnedSkills.LoadOrStore(s.Name, struct{}{}); dup {
 		return
 	}
-	notice.Notifyf("skill %s: в description нет условия активации — скилл может ни разу не открыться", s.Name)
+	notice.Notifyf("skill %s: в description нет условия активации — скилл может ни разу не открыться", sanitizeSkillName(s.Name))
+}
+
+// maxSkillNameRunes caps the sanitized name in a hygiene notice, in runes.
+const maxSkillNameRunes = 64
+
+// sanitizeSkillName makes a skill name safe for terminal emission: C0/C1
+// control characters (U+0000–U+001F, U+007F–U+009F — ESC, BEL, CR, LF and
+// friends) are dropped entirely, so no name can carry an escape sequence
+// into the notice path. The result is capped at maxSkillNameRunes runes;
+// a cut name keeps a trailing ellipsis.
+func sanitizeSkillName(name string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r <= 0x1F || (r >= 0x7F && r <= 0x9F) {
+			return -1
+		}
+		return r
+	}, name)
+	if runes := []rune(clean); len(runes) > maxSkillNameRunes {
+		clean = string(runes[:maxSkillNameRunes]) + "…"
+	}
+	return clean
 }
 
 // AppendActiveSkill returns prompt with an "# Active Skill" section appended
