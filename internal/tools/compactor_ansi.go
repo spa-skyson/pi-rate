@@ -18,7 +18,7 @@ func hardTruncate(s string, maxChars int) (string, bool) {
 	if maxChars <= 0 || len(s) <= maxChars {
 		return s, false
 	}
-	return s[:maxChars] + "\n... (output truncated)", true
+	return s[:maxChars] + truncationMarker(len(s)-maxChars), true
 }
 
 // hardTruncateLines enforces an absolute line limit on output.
@@ -32,7 +32,7 @@ func hardTruncateLines(s string, maxLines int) (string, bool) {
 		if s[i] == '\n' {
 			count++
 			if count >= maxLines {
-				return s[:i] + "\n... (output truncated)", true
+				return s[:i] + truncationMarker(len(s)-i), true
 			}
 		}
 	}

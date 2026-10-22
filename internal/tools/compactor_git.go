@@ -165,7 +165,9 @@ func hardTruncateContent(s string, maxChars int) string {
 		cut = cut[:i]
 	}
 	dropped := strings.Count(s[len(cut):], "\n")
-	return cut + fmt.Sprintf("\n  ... (%d lines truncated)\n", dropped)
+	// The line count says how much of the hunk is missing; the char marker is
+	// the shared cut disclosure every truncation point carries.
+	return cut + fmt.Sprintf("\n  ... (%d lines truncated)\n", dropped) + truncationMarker(len(s)-len(cut))
 }
 
 // gitTextStage pairs a compaction step with the technique name it reports, so
@@ -391,7 +393,12 @@ func compactGitDiffText(s string, cfg CompactorConfig) (string, bool) {
 	c.flushFile()
 
 	if c.totalLines < len(lines) {
+		omitted := strings.Join(lines[c.totalLines:], "\n")
 		fmt.Fprintf(&c.b, "\n... (%d lines omitted from diff)\n", len(lines)-c.totalLines)
+		// The lines count discloses the diff structure; the shared char marker
+		// says how much text the cut removed in absolute terms.
+		c.b.WriteString(truncationMarker(len(omitted)))
+		c.b.WriteString("\n")
 	}
 
 	result := c.b.String()
@@ -410,16 +417,30 @@ func compactGitLogText(s string, cfg CompactorConfig) (string, bool) {
 
 	var b strings.Builder
 	entries := 0
-	for _, line := range lines {
+	cutFrom := -1
+	for i, line := range lines {
 		if strings.HasPrefix(line, "commit ") {
 			entries++
 			if entries > cfg.MaxLogEntries {
+				cutFrom = i
 				fmt.Fprintf(&b, "\n... (%d more entries)\n", countGitLogEntries(lines)-cfg.MaxLogEntries)
 				break
 			}
 		}
 		if entries <= cfg.MaxLogEntries {
 			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
+	if cutFrom >= 0 {
+		// The tail from the cut line on, newlines included, is what the cap
+		// removed; the shared char marker carries its size.
+		omitted := 0
+		for _, line := range lines[cutFrom:] {
+			omitted += len(line) + 1
+		}
+		if omitted > 0 {
+			b.WriteString(truncationMarker(omitted - 1))
 			b.WriteString("\n")
 		}
 	}
@@ -470,6 +491,12 @@ func compactGitStatusText(s string, cfg CompactorConfig) (string, bool) {
 
 	if fileLines > cfg.MaxStatusFiles {
 		fmt.Fprintf(&b, "... and %d more files\n", fileLines-cfg.MaxStatusFiles)
+		// The file count discloses what kinds of paths were skipped; the
+		// shared char marker carries the absolute size of the cut.
+		if cut := len(s) - len(b.String()); cut > 0 {
+			b.WriteString(truncationMarker(cut))
+			b.WriteString("\n")
+		}
 	}
 
 	result := b.String()

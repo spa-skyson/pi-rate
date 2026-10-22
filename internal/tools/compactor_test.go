@@ -60,7 +60,7 @@ func TestHardTruncate(t *testing.T) {
 			if applied != tt.applied {
 				t.Errorf("hardTruncate() applied = %v, want %v", applied, tt.applied)
 			}
-			if applied && !strings.HasSuffix(got, "... (output truncated)") {
+			if applied && !strings.Contains(got, truncationMarker(len(tt.input)-tt.maxChars)) {
 				t.Errorf("hardTruncate() should end with truncation marker")
 			}
 		})

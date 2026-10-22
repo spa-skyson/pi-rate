@@ -65,7 +65,7 @@ func TestFilterBuildOutput_Golden(t *testing.T) {
 			want: "main.go:3:5: undefined: foo\n  context one\n  context two\n" +
 				"main.go:9:1: error: bad thing\n  detail a\n" +
 				"FAIL\tpkg/a\t0.1s\nok  \tpkg/b\t0.2s\nbuild failed\nexit status 2\n" +
-				"... (2 errors shown, may have more)",
+				"... (2 errors shown, may have more)\n\u2026 (+74 chars truncated)",
 			applied: true,
 		},
 		{
@@ -76,7 +76,7 @@ func TestFilterBuildOutput_Golden(t *testing.T) {
 				"FAIL\tpkg/a\t0.1s", "ok  \tpkg/b\t0.2s", "build failed",
 				"exit status 1", "line ten", "line eleven",
 			),
-			want:    "FAIL\tpkg/a\t0.1s\nok  \tpkg/b\t0.2s\nbuild failed\nexit status 1",
+			want:    "FAIL\tpkg/a\t0.1s\nok  \tpkg/b\t0.2s\nbuild failed\nexit status 1\n\u2026 (+70 chars truncated)",
 			applied: true,
 		},
 		{
@@ -173,7 +173,7 @@ func TestAggregateTestOutput_Golden(t *testing.T) {
 			want: "Test Summary: PASS=1 FAIL=1 SKIP=1\n\nFailure Details:\n" +
 				"--- FAIL: TestOne (0.00s)\n    one_test.go:10: boom\n    one_test.go:11: more\n\n" +
 				"... and 1 more failures\n\nPackage Results:\n" +
-				"FAIL\tpkg/a\t0.15s\nok  \tpkg/b\t0.25s\n",
+				"FAIL\tpkg/a\t0.15s\nok  \tpkg/b\t0.25s\n\n\u2026 (+151 chars truncated)",
 			applied: true,
 		},
 		{
@@ -181,7 +181,7 @@ func TestAggregateTestOutput_Golden(t *testing.T) {
 			cfg:  cxCfg(nil),
 			in:   cxLines(passOnly...),
 			want: "Test Summary: PASS=2 FAIL=0 SKIP=0\n\nPackage Results:\n" +
-				"ok  \tpkg/one\t0.10s\nok  \tpkg/two\t0.20s\n",
+				"ok  \tpkg/one\t0.10s\nok  \tpkg/two\t0.20s\n\n\u2026 (+332 chars truncated)",
 			applied: true,
 		},
 		{
@@ -273,7 +273,7 @@ func TestSmartTruncate_Golden(t *testing.T) {
 			want: "line 0 error here\nwarning at 1\nfunc f2() {}\nline 5 error here\nwarning at 6\n" +
 				"func f7() {}\nline 10 error here\nwarning at 11\nfunc f12() {}\nline 15 error here\n" +
 				"warning at 16\nfunc f17() {}\nline 20 error here\nwarning at 21\nfunc f22() {}\n" +
-				"line 25 error here\nwarning at 26\nfunc f27() {}\n... (20 lines omitted)\n\nplain 39",
+				"line 25 error here\nwarning at 26\nfunc f27() {}\n... (20 lines omitted)\n\nplain 39\n\u2026 (+139 chars truncated)",
 			applied: true,
 		},
 		{
@@ -281,7 +281,7 @@ func TestSmartTruncate_Golden(t *testing.T) {
 			cfg:  cxCfg(func(c *CompactorConfig) { c.MaxLines = 5 }),
 			in:   cxLines(cxMixedScores()...),
 			want: "line 0 error here\nwarning at 1\nfunc f2() {}\nline 5 error here\nwarning at 6\n" +
-				"... (35 lines omitted)",
+				"... (35 lines omitted)\n\u2026 (+350 chars truncated)",
 			applied: true,
 		},
 		{
@@ -290,7 +290,7 @@ func TestSmartTruncate_Golden(t *testing.T) {
 			in:   cxLines(cxMostlyLowPriority()...),
 			want: "plain 0\nplain 1\nboom error at seven\nplain 2\nplain 4\nplain 5\nplain 6\n" +
 				"plain 8\nplain 9\nplain 10\nplain 12\nplain 13\nplain 14\nplain 16\nplain 17\n" +
-				"plain 18\nplain 20\nplain 21\n... (20 lines omitted)\nplain 38\n",
+				"plain 18\nplain 20\nplain 21\n... (20 lines omitted)\nplain 38\n\n\u2026 (+93 chars truncated)",
 			applied: true,
 		},
 		{
@@ -341,6 +341,9 @@ func TestCompactGitDiffText_Golden(t *testing.T) {
 		"diff --git a/c.go b/c.go",
 		"@@ -1 +1 @@",
 		"+cee",
+		"// padding padding padding padding padding padding padding padding 01",
+		"// padding padding padding padding padding padding padding padding 02",
+		"// padding padding padding padding padding padding padding padding 03",
 	)
 
 	tests := []struct {
@@ -361,7 +364,7 @@ func TestCompactGitDiffText_Golden(t *testing.T) {
 				"@@ -1,4 +1,6 @@\n ctx\n+add one\n+add two\n" +
 				"  ... (1 deletion, 1 addition truncated)\n  (+3 -1)\n" +
 				"diff --git a/b.go b/b.go\n--- a/b.go\n+++ b/b.go\n" +
-				"\n... (9 lines omitted from diff)\n",
+				"\n... (12 lines omitted from diff)\n\n\u2026 (+318 chars truncated)\n",
 			applied: true,
 		},
 		{

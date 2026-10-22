@@ -83,8 +83,9 @@ func treeHandler(sb *Sandbox, input TreeInput) (TreeOutput, error) {
 	}
 	b.WriteString(summary)
 
+	tree := b.String()
 	return TreeOutput{
-		Tree:  truncateOutput(b.String()),
+		Tree:  truncateOutput(tree),
 		Dirs:  dirs,
 		Files: files,
 	}, nil
@@ -115,7 +116,16 @@ func buildTree(fsys fs.FS, dir, prefix string, depth int, b *strings.Builder, di
 
 	for i, e := range visible {
 		if *count >= maxTreeEntries {
-			b.WriteString(prefix + treeLastConnector + "... (truncated)\n")
+			// Minimal estimate: only the current level's entry names are
+			// measured — skipped subtrees were never walked, so their bytes
+			// stay unknown.
+			omitted := 0
+			for _, v := range visible[i:] {
+				omitted += len(v.Name()) + 1
+			}
+			b.WriteString(prefix + treeLastConnector + "... (truncated)")
+			b.WriteString(truncationMarker(omitted))
+			b.WriteString("\n")
 			return
 		}
 		*count++

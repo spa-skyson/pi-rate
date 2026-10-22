@@ -144,7 +144,7 @@ func TestRead_ClampsLongLines(t *testing.T) {
 	if len(out.Content) > readByteBudget {
 		t.Errorf("content is %d bytes, over the %d budget", len(out.Content), readByteBudget)
 	}
-	if !strings.Contains(out.Content, "more characters on this line, clipped") {
+	if !strings.Contains(out.Content, truncationMarker(len(huge)-maxReadLineChars)) {
 		t.Error("the clipped line is not marked inline")
 	}
 	if !strings.Contains(out.Note, "were clipped") {

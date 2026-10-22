@@ -214,6 +214,10 @@ func renderWindow(win window, offset, totalLines int) ReadOutput {
 			reason += fmt.Sprintf(" (stopped at the %dKB output budget)", readByteBudget/1024)
 		}
 		notes = append(notes, reason+fmt.Sprintf("; continue with offset=%d.", win.nextOffset))
+		// The window marker carries the resume offset the model needs. The
+		// size of the skipped tail is not claimed: the reader stopped before
+		// it, so counting its bytes would mean doing the reading the window
+		// exists to avoid.
 		out.Content += fmt.Sprintf("\n... (truncated: %s; continue with offset=%d)", reason, win.nextOffset)
 	}
 	out.Note = strings.Join(notes, " ")
@@ -351,7 +355,7 @@ func (s srcLine) endsFile(line int) bool {
 func (w *window) emitLine(b *strings.Builder, r *bufio.Reader, src srcLine, line, offset, limit int) bool {
 	text := src.text
 	if src.clipped > 0 {
-		text += fmt.Sprintf("… [%d more characters on this line, clipped]", src.clipped)
+		text += truncationMarker(src.clipped)
 		w.clampedLines++
 	}
 	// Check the byte budget before committing the line, so the budget is a

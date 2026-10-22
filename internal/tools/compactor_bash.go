@@ -202,6 +202,9 @@ func filterBuildOutput(s string, cfg CompactorConfig) (string, bool) {
 	if errorCount >= cfg.MaxBuildErrors {
 		result += fmt.Sprintf("\n... (%d errors shown, may have more)", errorCount)
 	}
+	if cut := len(s) - len(result); cut > 0 {
+		result += truncationMarker(cut)
+	}
 	return result, true
 }
 
@@ -295,7 +298,6 @@ func renderTestSummary(sum testOutputSummary, cfg CompactorConfig) string {
 			fmt.Fprintf(&b, "... and %d more failures\n", len(sum.failedTests)-cfg.MaxTestFailures)
 		}
 	}
-
 	if len(sum.resultLines) > 0 {
 		fmt.Fprintf(&b, "\nPackage Results:\n")
 		for _, r := range sum.resultLines {
@@ -323,6 +325,9 @@ func aggregateTestOutput(s string, cfg CompactorConfig) (string, bool) {
 	if len(result) >= len(s) {
 		return s, false
 	}
+	// The summary names what it kept; the shared char marker carries the size
+	// of everything it folded away.
+	result += truncationMarker(len(s) - len(result))
 	return result, true
 }
 
@@ -411,6 +416,7 @@ func aggregateLinterOutput(s string, cfg CompactorConfig) (string, bool) {
 	if len(result) >= len(s) {
 		return s, false
 	}
+	result += truncationMarker(len(s) - len(result))
 	return result, true
 }
 
@@ -544,6 +550,9 @@ func smartTruncate(s string, cfg CompactorConfig) (string, bool) {
 	}
 
 	output := strings.Join(result, "\n")
+	if len(output) < len(s) {
+		output += truncationMarker(len(s) - len(output))
+	}
 	return output, len(output) < len(s)
 }
 

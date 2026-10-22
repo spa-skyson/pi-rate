@@ -188,6 +188,7 @@ func groupSearchOutput(s string, cfg CompactorConfig) (string, bool) {
 	if len(result) >= len(s) {
 		return s, false
 	}
+	result += truncationMarker(len(s) - len(result))
 	return result, true
 }
 

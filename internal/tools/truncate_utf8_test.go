@@ -38,7 +38,7 @@ func TestTruncateLine_NeverSplitsARune(t *testing.T) {
 	if !utf8.ValidString(got) {
 		t.Error("truncateLine produced invalid UTF-8")
 	}
-	if !strings.HasSuffix(got, "...") {
+	if !strings.HasSuffix(got, "truncated)") {
 		t.Errorf("truncateLine dropped its marker: %q", got[max(0, len(got)-10):])
 	}
 }
