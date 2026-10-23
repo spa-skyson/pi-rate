@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 )
 
 // Palace is the top-level facade that ties all palace components together.
@@ -235,6 +236,13 @@ func (p *Palace) KGStats(ctx context.Context) (*KGStats, error) {
 // WakeUp returns the combined L0 + L1 context string.
 func (p *Palace) WakeUp(ctx context.Context, wing string) (string, error) {
 	return p.layers.WakeUp(ctx, wing)
+}
+
+// WakeUpAt is WakeUp with a prefix-only cutoff for lessons (issue 81): the
+// caller passes the session start time, so lessons created during or after
+// the session are absent from its own context injection.
+func (p *Palace) WakeUpAt(ctx context.Context, wing string, cutoff time.Time) (string, error) {
+	return p.layers.WakeUpAt(ctx, wing, cutoff)
 }
 
 // Recall returns L2 on-demand context for a specific wing and room.

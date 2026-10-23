@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 // MemoryStack implements the 4-layer memory system for system prompt context
@@ -45,10 +46,25 @@ func (ms *MemoryStack) loadIdentity() (string, error) {
 // loadEssentialStory builds the L1 essential story: top drawers sorted by
 // importance, grouped by room, truncated to fit within L1MaxChars.
 func (ms *MemoryStack) loadEssentialStory(ctx context.Context, wing string) (string, error) {
+	return ms.loadEssentialStorySkip(ctx, wing, nil)
+}
+
+// loadEssentialStorySkip is loadEssentialStory over the drawers that survive
+// skip; a nil skip keeps every drawer.
+func (ms *MemoryStack) loadEssentialStorySkip(ctx context.Context, wing string, skip func(*Drawer) bool) (string, error) {
 	filter := DrawerFilter{Wing: wing}
 	drawers, err := ms.store.ListDrawers(ctx, filter)
 	if err != nil {
 		return "", fmt.Errorf("palace: list drawers for L1: %w", err)
+	}
+	if skip != nil {
+		kept := drawers[:0]
+		for _, d := range drawers {
+			if !skip(d) {
+				kept = append(kept, d)
+			}
+		}
+		drawers = kept
 	}
 	if len(drawers) == 0 {
 		return "", nil
@@ -151,17 +167,40 @@ func (ms *MemoryStack) Recall(ctx context.Context, wing, room string) (string, e
 
 // WakeUp returns the combined L0 + L1 context string for system prompt injection.
 func (ms *MemoryStack) WakeUp(ctx context.Context, wing string) (string, error) {
+	return ms.WakeUpAt(ctx, wing, time.Now())
+}
+
+// WakeUpAt is WakeUp with an explicit prefix-only cutoff for lessons (issue
+// 81): the caller passes the session start time so lessons created during or
+// after the session never appear in its own context injection. Load-time —
+// the natural session-start moment — is the only sane default WakeUp can pick
+// on its own.
+func (ms *MemoryStack) WakeUpAt(ctx context.Context, wing string, cutoff time.Time) (string, error) {
 	identity, err := ms.loadIdentity()
 	if err != nil {
 		return "", err
 	}
 
-	story, err := ms.loadEssentialStory(ctx, wing)
+	story, err := ms.loadEssentialStorySkip(ctx, wing, func(d *Drawer) bool {
+		// Prefix-only lessons (issue 81): a lesson drawer appears only in the
+		// lesson section below, filtered by the cutoff — its raw content must
+		// not slip into the L1 story unfiltered.
+		_, isLesson := ParseLesson(d.Content)
+		return isLesson
+	})
 	if err != nil {
 		return "", err
 	}
 
-	if identity == "" && story == "" {
+	// Prefix-only lessons (issue 81): only drawers created strictly before
+	// the cutoff become lesson entries; later ones stay invisible here while
+	// remaining fully searchable through palace-search.
+	lessons, err := ms.lessonsBefore(ctx, cutoff)
+	if err != nil {
+		return "", err
+	}
+
+	if identity == "" && story == "" && len(lessons) == 0 {
 		return "", nil
 	}
 
@@ -172,8 +211,42 @@ func (ms *MemoryStack) WakeUp(ctx context.Context, wing string) (string, error) 
 	if story != "" {
 		parts = append(parts, fmt.Sprintf("## Essential Knowledge\n\n%s", story))
 	}
+	if len(lessons) > 0 {
+		parts = append(parts, renderLessons(lessons))
+	}
 
 	return strings.Join(parts, "\n\n"), nil
+}
+
+// lessonsBefore collects the parsed lessons of every drawer created strictly
+// before cutoff, in creation order.
+func (ms *MemoryStack) lessonsBefore(ctx context.Context, cutoff time.Time) ([]Lesson, error) {
+	drawers, err := ms.store.ListDrawers(ctx, DrawerFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("palace: lessons before cutoff: %w", err)
+	}
+	var lessons []Lesson
+	for _, d := range drawers {
+		if !d.CreatedAt.Before(cutoff) {
+			continue
+		}
+		if l, ok := ParseLesson(d.Content); ok {
+			lessons = append(lessons, l)
+		}
+	}
+	return lessons, nil
+}
+
+// renderLessons formats the lesson block for the wake-up context: one bullet
+// per lesson, cue leading and evidence kept, confidence in parentheses.
+func renderLessons(lessons []Lesson) string {
+	var sb strings.Builder
+	sb.WriteString("## Lessons\n\n")
+	for _, l := range lessons {
+		fmt.Fprintf(&sb, "- %s → %s (evidence: %s; confidence: %s)\n",
+			l.Cue, l.Lesson, l.Evidence, l.Confidence)
+	}
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // truncateChars truncates a string to maxChars, adding "…" if truncated.

@@ -435,3 +435,103 @@ func TestLayers_TruncateChars(t *testing.T) {
 func layersTestID(prefix string, index int) string {
 	return GenerateDrawerID(prefix, "test", "", index, strings.Repeat("x", index+1))
 }
+
+// lessonDrawer builds a lesson drawer with an explicit creation time, the
+// shape lessons carry when written by another session.
+func lessonDrawer(id string, l Lesson, createdAt time.Time) *Drawer {
+	return &Drawer{
+		ID:         id,
+		Wing:       "proj",
+		Room:       "lessons",
+		Content:    FormatLesson(l),
+		Importance: 5,
+		CreatedAt:  createdAt,
+	}
+}
+
+func TestWakeUpAt_PrefixOnlyLessons(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	cutoff := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	before := Lesson{
+		Cue:        "created before the session",
+		Lesson:     "must be visible in the wake-up context",
+		Evidence:   "issue 81: prefix-only lessons",
+		Confidence: "high",
+	}
+	after := Lesson{
+		Cue:        "created during the session",
+		Lesson:     "must not leak into the session's own context",
+		Evidence:   "issue 81: prefix-only lessons",
+		Confidence: "high",
+	}
+
+	// Distinct drawer ids: InsertDrawer is INSERT OR REPLACE keyed on id.
+	if err := store.InsertDrawer(ctx, lessonDrawer("drawer_lesson_before", before, cutoff.Add(-time.Hour))); err != nil {
+		t.Fatalf("InsertDrawer(before): %v", err)
+	}
+	if err := store.InsertDrawer(ctx, lessonDrawer("drawer_lesson_after", after, cutoff.Add(time.Hour))); err != nil {
+		t.Fatalf("InsertDrawer(after): %v", err)
+	}
+
+	ms := NewMemoryStack(store, nil, DefaultConfig())
+	got, err := ms.WakeUpAt(ctx, "", cutoff)
+	if err != nil {
+		t.Fatalf("WakeUpAt: %v", err)
+	}
+
+	if !strings.Contains(got, before.Cue) || !strings.Contains(got, before.Lesson) {
+		t.Errorf("wake-up context %q does not carry the pre-cutoff lesson", got)
+	}
+	if strings.Contains(got, after.Cue) || strings.Contains(got, after.Lesson) {
+		t.Errorf("lesson created after the cutoff leaked into the wake-up context:\n%s", got)
+	}
+}
+
+func TestWakeUpAt_LessonsOnlyContext(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	cutoff := time.Now().UTC()
+	lesson := Lesson{
+		Cue:        "before a go test run",
+		Lesson:     "run go test ./internal/... first",
+		Evidence:   "a red suite wasted a push",
+		Confidence: "high",
+	}
+	if err := store.InsertDrawer(ctx, lessonDrawer("drawer_lesson_solo", lesson, cutoff.Add(-time.Hour))); err != nil {
+		t.Fatalf("InsertDrawer: %v", err)
+	}
+
+	ms := NewMemoryStack(store, nil, DefaultConfig())
+	got, err := ms.WakeUpAt(ctx, "", cutoff)
+	if err != nil {
+		t.Fatalf("WakeUpAt: %v", err)
+	}
+	if !strings.Contains(got, "## Lessons") {
+		t.Fatalf("wake-up context %q has no lesson section", got)
+	}
+	for _, want := range []string{lesson.Cue, lesson.Lesson, lesson.Evidence, lesson.Confidence} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lesson section %q misses %q", got, want)
+		}
+	}
+}
+
+func TestWakeUpAt_EmptyPalaceStillEmpty(t *testing.T) {
+	t.Parallel()
+
+	ms := NewMemoryStack(newTestStore(t), nil, DefaultConfig())
+	got, err := ms.WakeUpAt(context.Background(), "", time.Now())
+	if err != nil {
+		t.Fatalf("WakeUpAt: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("WakeUpAt() = %q on an empty palace, want empty", got)
+	}
+}
