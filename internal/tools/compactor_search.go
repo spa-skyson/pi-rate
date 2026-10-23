@@ -188,6 +188,9 @@ func groupSearchOutput(s string, cfg CompactorConfig) (string, bool) {
 	if len(result) >= len(s) {
 		return s, false
 	}
+	// Minimum: the grouped form re-renders kept lines, so the byte delta
+	// counts re-rendering as cut — a lower bound on what folded away.
+	result += truncationMarkerMin(len(s) - len(result))
 	return result, true
 }
 

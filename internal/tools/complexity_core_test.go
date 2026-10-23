@@ -311,7 +311,7 @@ func TestWindowEmitLine(t *testing.T) {
 		var w window
 		r := bufio.NewReader(strings.NewReader(""))
 		w.emitLine(&b, r, srcLine{text: "abc", clipped: 9}, 1, 1, 10)
-		if !strings.Contains(b.String(), "… [9 more characters on this line, clipped]") {
+		if !strings.Contains(b.String(), truncationMarker(9)) {
 			t.Errorf("missing clip marker in %q", b.String())
 		}
 		if w.clampedLines != 1 {

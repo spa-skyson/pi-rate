@@ -94,7 +94,12 @@ func TestDeferredCallbacks_DedupSeesPreCompactionBytes(t *testing.T) {
 			"collide. Dedup must run before the compactor.\nresult: %q",
 			truncateForErr(got, 200))
 	}
-	if !strings.Contains(got, "omitted") {
+	// Disclosure for hunk-cap elision (MaxDiffHunkLines) is the per-hunk note
+	// "(N deletions, N additions truncated)" plus a tally; the
+	// "lines omitted from diff ... (+N bytes truncated)" marker appears only
+	// when the cut is by MaxDiffLines. Both tell the model the content was
+	// elided, which is what this assertion guards.
+	if !strings.Contains(got, "truncated") {
 		t.Errorf("expected the diff to be compacted with a disclosure; got %q",
 			truncateForErr(got, 200))
 	}

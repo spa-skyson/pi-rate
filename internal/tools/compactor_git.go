@@ -165,7 +165,9 @@ func hardTruncateContent(s string, maxChars int) string {
 		cut = cut[:i]
 	}
 	dropped := strings.Count(s[len(cut):], "\n")
-	return cut + fmt.Sprintf("\n  ... (%d lines truncated)\n", dropped)
+	// The line count says how much of the hunk is missing; the char marker is
+	// the shared cut disclosure every truncation point carries.
+	return cut + fmt.Sprintf("\n  ... (%d lines truncated)\n", dropped) + truncationMarker(len(s)-len(cut))
 }
 
 // gitTextStage pairs a compaction step with the technique name it reports, so
@@ -253,6 +255,13 @@ type diffTextCompactor struct {
 	currentFile string
 	additions   int
 	deletions   int
+
+	// srcIndex is the position in the caller's line slice of the line consume
+	// last saw. The final cut marker is computed from it, not from totalLines:
+	// totalLines counts emitted lines only, while hunk lines past the cap are
+	// consumed but never emitted — slicing by totalLines would re-attribute
+	// already-consumed lines to the omitted tail and inflate the marker.
+	srcIndex int
 
 	// Per-hunk counters for the lines dropped past MaxDiffHunkLines. Without
 	// them a cap that lands inside an unbalanced run shows only one sign, and
@@ -379,8 +388,11 @@ func compactGitDiffText(s string, cfg CompactorConfig) (string, bool) {
 	}
 
 	c := &diffTextCompactor{cfg: cfg}
-	for _, line := range lines {
+	cutByLimit := false
+	for i, line := range lines {
+		c.srcIndex = i
 		if c.totalLines >= cfg.MaxDiffLines {
+			cutByLimit = true
 			break
 		}
 		c.consume(line)
@@ -390,8 +402,22 @@ func compactGitDiffText(s string, cfg CompactorConfig) (string, bool) {
 	c.flushHunkNote()
 	c.flushFile()
 
-	if c.totalLines < len(lines) {
-		fmt.Fprintf(&c.b, "\n... (%d lines omitted from diff)\n", len(lines)-c.totalLines)
+	// Only a stop on the total line limit is a real cut. A loop that runs off
+	// the end of the input — the hunk cap consumed everything, so totalLines
+	// never reached MaxDiffLines — has no omitted tail: srcIndex then points
+	// at the last consumed line, and writing a marker here would report the
+	// final line as omitted though it was fully emitted.
+	if cutByLimit && c.srcIndex < len(lines) {
+		// Slice by srcIndex — the position the loop stopped at — not by
+		// totalLines: consumed-but-unemitted hunk lines belong to the kept
+		// side's accounting already, so the marker names the true remainder.
+		omitted := strings.Join(lines[c.srcIndex:], "\n")
+		fmt.Fprintf(&c.b, "\n... (%d lines omitted from diff)\n", len(lines)-c.srcIndex)
+		// The lines count discloses the diff structure; the shared byte marker
+		// says how much text the cut removed in absolute terms — exact here,
+		// because both sides of the subtraction are byte-measured.
+		c.b.WriteString(truncationMarker(len(omitted)))
+		c.b.WriteString("\n")
 	}
 
 	result := c.b.String()
@@ -410,16 +436,30 @@ func compactGitLogText(s string, cfg CompactorConfig) (string, bool) {
 
 	var b strings.Builder
 	entries := 0
-	for _, line := range lines {
+	cutFrom := -1
+	for i, line := range lines {
 		if strings.HasPrefix(line, "commit ") {
 			entries++
 			if entries > cfg.MaxLogEntries {
+				cutFrom = i
 				fmt.Fprintf(&b, "\n... (%d more entries)\n", countGitLogEntries(lines)-cfg.MaxLogEntries)
 				break
 			}
 		}
 		if entries <= cfg.MaxLogEntries {
 			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
+	if cutFrom >= 0 {
+		// The tail from the cut line on, newlines included, is what the cap
+		// removed; the shared char marker carries its size.
+		omitted := 0
+		for _, line := range lines[cutFrom:] {
+			omitted += len(line) + 1
+		}
+		if omitted > 0 {
+			b.WriteString(truncationMarker(omitted - 1))
 			b.WriteString("\n")
 		}
 	}
@@ -470,6 +510,12 @@ func compactGitStatusText(s string, cfg CompactorConfig) (string, bool) {
 
 	if fileLines > cfg.MaxStatusFiles {
 		fmt.Fprintf(&b, "... and %d more files\n", fileLines-cfg.MaxStatusFiles)
+		// The file count discloses what kinds of paths were skipped; the
+		// shared char marker carries the absolute size of the cut.
+		if cut := len(s) - len(b.String()); cut > 0 {
+			b.WriteString(truncationMarker(cut))
+			b.WriteString("\n")
+		}
 	}
 
 	result := b.String()

@@ -66,7 +66,10 @@ func TestDedup_ChangedDiffIsNotElided(t *testing.T) {
 		t.Errorf("a CHANGED diff was elided as an unchanged repeat; the model is told "+
 			"nothing changed:\n%q", second)
 	}
-	if !strings.Contains(first, "omitted") || !strings.Contains(second, "omitted") {
+	// The whole diff lives in one hunk, so the hunk cap drops it and the
+	// disclosure is the per-hunk note — the omitted-tail marker exists only
+	// for a cut by the total line limit, which this input never reaches.
+	if !strings.Contains(first, "truncated)") || !strings.Contains(second, "truncated)") {
 		t.Errorf("expected both diffs to be compacted with a disclosure; got\n1: %q\n2: %q",
 			truncForLog(first, 120), truncForLog(second, 120))
 	}
@@ -98,7 +101,10 @@ func TestDedup_TwoDistinctResultsNeverCollapse(t *testing.T) {
 		if strings.Contains(bb, "identical to the result") {
 			t.Errorf("changed diff elided as unchanged")
 		}
-		if !strings.Contains(a, "omitted") && !strings.Contains(bb, "omitted") {
+		// One hunk holds the whole diff, so the honest disclosure is the
+		// hunk-cap note; the omitted-tail marker belongs to a total-limit
+		// cut, which this shape never reaches.
+		if !strings.Contains(a, "truncated)") && !strings.Contains(bb, "truncated)") {
 			t.Errorf("neither diff was compacted; the test is not exercising the chain")
 		}
 	})

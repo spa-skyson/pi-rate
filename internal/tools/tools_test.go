@@ -684,11 +684,14 @@ func TestTruncateLine(t *testing.T) {
 	t.Run("long line truncated", func(t *testing.T) {
 		s := strings.Repeat("x", maxLineLength+100)
 		result := truncateLine(s)
-		if len(result) > maxLineLength+10 {
+		if len(result) > maxLineLength+40 {
 			t.Errorf("expected truncation, got length %d", len(result))
 		}
-		if !strings.HasSuffix(result, "...") {
-			t.Error("expected '...' suffix")
+		if !strings.Contains(result, truncationMarkerInline(len(s)-len(utf8SafeCut(s, maxLineLength)))) {
+			t.Error("expected the inline truncation marker with the cut size")
+		}
+		if strings.ContainsAny(result, "\n\r") {
+			t.Errorf("a truncated line must stay one line: %q", result[maxLineLength-10:])
 		}
 	})
 }
@@ -708,8 +711,11 @@ func TestGrepTruncatesLongLines(t *testing.T) {
 	if len(out.Matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(out.Matches))
 	}
-	if len(out.Matches[0].Content) > maxLineLength+10 {
+	if len(out.Matches[0].Content) > maxLineLength+40 {
 		t.Errorf("match content not truncated: length %d", len(out.Matches[0].Content))
+	}
+	if !strings.Contains(out.Matches[0].Content, truncationMarkerInline(len(longLine)-maxLineLength)) {
+		t.Errorf("match content lacks the inline truncation marker: %q", out.Matches[0].Content[max(0, len(out.Matches[0].Content)-40):])
 	}
 }
 
