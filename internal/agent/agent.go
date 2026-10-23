@@ -1538,12 +1538,24 @@ func appendSkillsMenu(skills []extension.Skill) string {
 
 // skillActivationMarkers are the phrases a skill description uses to state
 // when the skill applies. A description carrying none of them gives the model
-// no cue to open the skill, so it can sit in the menu forever.
+// no cue to open the skill, so it can sit in the menu forever. The list
+// covers the common EN/RU phrasings; false positives are acceptable
+// (warn-only), false negatives drown the signal.
 var skillActivationMarkers = []string{
 	"use when",
 	"when to use",
 	"используй когда",
 	"если",
+	"use this skill when",
+	"use this skill whenever",
+	"use whenever",
+	"whenever the user",
+	"используй, когда",
+	"загружай когда",
+	"загружай для",
+	"загружай, когда",
+	"use for",
+	"применяй когда",
 }
 
 // warnSkillMissingTrigger raises one notice per skill whose description has

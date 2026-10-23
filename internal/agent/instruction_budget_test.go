@@ -211,6 +211,39 @@ func TestSkillTriggerHygiene(t *testing.T) {
 	if menu != want {
 		t.Errorf("menu changed:\n got %q\nwant %q", menu, want)
 	}
+
+	// Common EN/RU activation phrasings from live skill descriptions must
+	// not warn: each carries a real activation condition the marker list
+	// used to miss.
+	commonPhrasings := []extension.Skill{
+		{Name: "agents-md", Description: "Use this skill whenever the user asks to create AGENTS.md."},
+		{Name: "glab", Description: "Use this skill when working with GitLab merge requests."},
+		{Name: "orbit", Description: "Use whenever the user needs a launch plan."},
+		{Name: "whenever-user", Description: "Whenever the user asks about performance, profile first."},
+		{Name: "ste-explanations", Description: "Загружай для объяснения шагов оценивания."},
+		{Name: "memory-palace", Description: "Используй, когда задача нетривиальная."},
+		// Old markers keep matching after the extension.
+		{Name: "when-to-use", Description: "When to use: large refactors."},
+	}
+	// A descriptive one-liner with no activation condition still warns.
+	lazy := extension.Skill{Name: "lazy-skill", Description: "Forces the laziest solution that actually works"}
+
+	a.warnSkillTriggers(append(commonPhrasings, lazy))
+
+	raised = notices()
+	for _, msg := range raised {
+		if strings.Contains(msg, "skill lazy-skill:") {
+			continue
+		}
+		for _, s := range commonPhrasings {
+			if strings.Contains(msg, "skill "+s.Name+":") {
+				t.Errorf("skill with an activation marker must not be warned: %s", msg)
+			}
+		}
+	}
+	if hits := countMsgs(raised, "skill lazy-skill:"); hits != 1 {
+		t.Errorf("got %d warnings for lazy-skill, want exactly 1: %q", hits, raised)
+	}
 }
 
 // TestSkillWarningDedupIsPerAgent builds two agents in one process and
