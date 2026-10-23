@@ -1,4 +1,4 @@
-.PHONY: vulncheck build install test test-unit test-integration test-e2e test-all test-coverage test-ollama check-cve scan sbom lint vet e2e clean sandbox-run sandbox-log eval-run eval-pin eval-judge eval-tools eval-tools-judge record-pgo cache-clean hooks fetch-models fetch-modelsdev-pricing fetch-ollama-pricing
+.PHONY: vulncheck build install test test-unit test-integration test-e2e test-all test-coverage test-ollama check-cve scan sbom lint vet e2e clean sandbox-run sandbox-log eval-run eval-pin eval-judge eval-tools eval-tools-judge eval-harness-compare record-pgo cache-clean hooks fetch-models fetch-modelsdev-pricing fetch-ollama-pricing
 
 # No GOEXPERIMENT=simd: Go 1.27 changed the simd/archsimd intrinsics API, and
 # gomlx/compute's amd64 matmul kernels (gated on
@@ -131,6 +131,23 @@ eval-tools: build
 eval-tools-judge: build
 	PI_EVAL_TOOLS=1 PI_EVAL_JUDGE_MODEL=$(PI_EVAL_JUDGE_MODEL) PI_BINARY=$(abspath ./pirate) \
 		go test -tags e2e -v -run '^TestEvalTools$$' ./internal/eval/scenarios/ -parallel 4 -timeout 60m
+
+# Live harness A/B comparison (issue #80): the control arm on the file-driven
+# prompt assembly vs a variant with injected InstructionParts, over the real
+# tool loop and a live model, contrasted by internal/eval/compare. Without
+# PI_HARNESS_AB_LIVE=1 the test skips. Requires a live provider when enabled
+# (ANTHROPIC_API_KEY, or OPENAI_API_KEY + OPENAI_BASE_URL); without one the
+# run skips with a reason. Knobs: PI_HARNESS_AB_LIVE=1 to enable,
+# PI_HARNESS_AB_RUNS=<n> runs per arm (below 5 is reported as a noise floor
+# in the report), PI_HARNESS_AB_BLIND=1 to render an anonymized (blind)
+# report, PI_HARNESS_AB_SEED=<n> to pin the blind shuffle (default 1). The
+# target passes the environment through: whatever you export decides.
+# Finished comparisons are cached under .harness-compare/ in the repo root —
+# a second invocation with unchanged variants prints "reused" instead of
+# re-running the arms; delete the file to force a fresh comparison.
+.PHONY: eval-harness-compare
+eval-harness-compare:
+	go test ./internal/eval/compare/ -run TestLiveCompare -count=1 -v -timeout 30m
 
 # Record a PGO profile: run the tool-coverage eval suite with --cpuprofile on
 # every scenario's pirate process, plus the TUI render benchmarks, then merge all
