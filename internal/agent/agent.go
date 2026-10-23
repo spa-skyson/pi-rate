@@ -354,6 +354,24 @@ type Config struct {
 	// If empty, SystemInstruction is used.
 	Instruction string
 
+	// InstructionParts, when non-nil, replaces the on-disk assembly as the
+	// source of the prompt: buildRunner and the rebuild methods use Base,
+	// Rules and Skills exactly as given instead of reading context files and
+	// the skills menu for the working directory. This is the programmatic
+	// injection point for driving variant prompts (harness A/B runs) without
+	// writing to the filesystem.
+	//
+	// Env from the supplied parts is always ignored: the volatile
+	// "# Runtime Environment" block is recomposed from the live process
+	// environment at build time and appended last, so the block stays fresh
+	// and the Base+Rules+Skills+Env ordering is never broken.
+	//
+	// Nil (the default) keeps the file-driven behavior byte-for-byte. When
+	// set, the total-budget gate applies to the supplied parts the same way
+	// it applies to a file-assembled prompt: an over-budget build fails
+	// naming the sections.
+	InstructionParts *InstructionParts
+
 	// SessionService overrides the default in-memory session service.
 	// If nil, an in-memory service is created.
 	SessionService session.Service
@@ -508,8 +526,33 @@ func injectWithFailOpen(ctx adkagent.ReadonlyContext, template string, log *logg
 	return b.String()
 }
 
+// resolveInjectedPrompt returns the fully assembled prompt an injected
+// Config.InstructionParts produces — Env dropped, the volatile environment
+// block recomposed from the live process environment, "Current working
+// directory" line appended the way New() does. It returns nil unless
+// injection is configured, so every caller can take the plain-string path
+// unchanged.
+//
+// The cwd line mirrors New(): when an injection overrides the file assembly,
+// there is no place in the string where a file-driven run would have appended
+// it, so it lands before the env block to keep the order stable. An
+// unreadable working directory omits the line.
+func resolveInjectedPrompt(cfg Config) *string {
+	if cfg.InstructionParts == nil {
+		return nil
+	}
+	parts := *cfg.InstructionParts
+	parts.Base = cfg.Instruction
+	parts.Env = environmentContext(os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), cfg.workingDir())
+	if cwd := cfg.workingDir(); cwd != "" {
+		parts.Base += fmt.Sprintf("\nCurrent working directory: %s\n", cwd)
+	}
+	prompt := parts.String()
+	return &prompt
+}
+
 func buildRunner(cfg Config, instruction string, sessionSvc session.Service) (*runner.Runner, error) {
-	if err := checkInstructionTotal(instruction, nil); err != nil {
+	if err := checkInstructionTotal(instruction, cfg.InstructionParts); err != nil {
 		return nil, err
 	}
 	name := cfg.Name
@@ -545,6 +588,14 @@ func buildRunner(cfg Config, instruction string, sessionSvc session.Service) (*r
 
 // New creates a new Agent with the given configuration.
 func New(cfg Config) (*Agent, error) {
+	// Programmatic injection: the prompt comes from cfg.InstructionParts
+	// (Env recomposed from the live environment) instead of the file
+	// assembly. Nothing below re-reads context files or the skills menu for
+	// this path — the same prompt buildRunner gates and passes to the runner.
+	if injected := resolveInjectedPrompt(cfg); injected != nil {
+		return newWithPrompt(cfg, *injected)
+	}
+
 	instruction := cfg.Instruction
 	if instruction == "" {
 		instruction = SystemInstruction
@@ -585,6 +636,38 @@ func New(cfg Config) (*Agent, error) {
 	return a, nil
 }
 
+// newWithPrompt is the shared tail of New: session service, runner build
+// (the gate runs inside buildRunner), inventory line, hygiene pass. prompt is
+// the fully assembled string the runner receives.
+func newWithPrompt(cfg Config, prompt string) (*Agent, error) {
+	sessionSvc := cfg.SessionService
+	if sessionSvc == nil {
+		sessionSvc = session.InMemoryService()
+	}
+
+	r, err := buildRunner(cfg, prompt, sessionSvc)
+	if err != nil {
+		return nil, err
+	}
+
+	logContextInventory(cfg.Logger, prompt, cfg.InstructionParts, cfg.Tools)
+
+	a := &Agent{
+		runner:         r,
+		sessionService: sessionSvc,
+		config:         cfg,
+	}
+	// Skill hygiene over the on-disk skill set for the working directory:
+	// injection replaces the prompt, not the skill directory state — the
+	// same notices file-driven runs raise must still fire. The per-agent
+	// dedup keeps repeats silent.
+	if cwd := cfg.workingDir(); cwd != "" {
+		a.warnSkillTriggers(loadedSkillsForDir(cwd))
+	}
+
+	return a, nil
+}
+
 // RebuildWithInstruction recreates the agent's internal runner with a new
 // system instruction while preserving all other configuration (tools, callbacks, etc.).
 // The session service is reused so existing sessions remain accessible.
@@ -596,7 +679,8 @@ func (a *Agent) RebuildWithInstruction(instruction string) error {
 		return fmt.Errorf("instruction must not be empty")
 	}
 
-	r, err := buildRunner(cfg, instruction, a.sessionService)
+	prompt := a.promptSource(cfg)
+	r, err := buildRunner(cfg, prompt, a.sessionService)
 	if err != nil {
 		return fmt.Errorf("rebuilding runner: %w", err)
 	}
@@ -605,15 +689,78 @@ func (a *Agent) RebuildWithInstruction(instruction string) error {
 	a.config = cfg
 	// Same inventory line the other rebuild paths and New() write: a rebuilt
 	// prompt is a new context cost, and the session log must show it.
-	logContextInventory(a.config.Logger, instruction, nil, a.config.Tools)
+	logContextInventory(a.config.Logger, prompt, a.inventoryParts(), a.config.Tools)
 	// Re-run skill hygiene on the current skill set: a skill created since New
 	// (create_skill, plan) is first seen here. The warnedSkills dedup keeps
 	// already-warned skills silent, so a rebuild is never noisier than the
 	// first pass.
+	a.warnSkills()
+	return nil
+}
+
+// RebuildWithParts recreates the agent's internal runner from a programmatically
+// supplied InstructionParts, by the same contract as the Config.InstructionParts
+// injection: Base+Rules+Skills are used as given, Env is dropped and the
+// volatile environment block is recomposed from the live process environment
+// and appended last. The session service is reused so existing sessions remain
+// accessible.
+//
+// After the rebuild the same hooks the other rebuild paths run fire: the
+// context inventory line is written to the session log, and the skill-menu
+// hygiene pass runs over the on-disk skill set for the working directory —
+// the warnedSkills dedup keeps already-warned skills silent. The cwd source
+// is Config.workingDir(), the one RebuildWithInstruction uses.
+//
+// An over-budget assembly fails exactly like a file-assembled one: with the
+// per-section overrun list. The config is left untouched on failure.
+func (a *Agent) RebuildWithParts(parts InstructionParts) error {
+	cfg := a.config
+	cfg.InstructionParts = &parts
+
+	prompt := a.promptSource(cfg)
+	r, err := buildRunner(cfg, prompt, a.sessionService)
+	if err != nil {
+		return fmt.Errorf("rebuilding runner: %w", err)
+	}
+
+	a.runner = r
+	a.config = cfg
+	logContextInventory(a.config.Logger, prompt, a.inventoryParts(), a.config.Tools)
+	a.warnSkills()
+	return nil
+}
+
+// promptSource resolves the fully assembled prompt for a rebuild from the
+// config being rebuilt with: the injected string when InstructionParts is set
+// (Env recomposed, cwd line appended — the New() injection contract), the
+// plain instruction otherwise.
+func (a *Agent) promptSource(cfg Config) string {
+	if injected := resolveInjectedPrompt(cfg); injected != nil {
+		return *injected
+	}
+	return cfg.Instruction
+}
+
+// inventoryParts returns the section attribution for the context inventory
+// line: the injected parts when set (Env zeroed — the line never attributes
+// the recomposed block to the caller's stale Env), nil for a plain-string
+// prompt so the inventory falls back to its marker heuristic.
+func (a *Agent) inventoryParts() *InstructionParts {
+	if a.config.InstructionParts == nil {
+		return nil
+	}
+	parts := *a.config.InstructionParts
+	parts.Env = ""
+	return &parts
+}
+
+// warnSkills runs the skill-menu hygiene pass over the on-disk skill set for
+// the agent's working directory. No-op without one. The per-agent dedup keeps
+// an unchanged set silent, so rebuild paths can call this unconditionally.
+func (a *Agent) warnSkills() {
 	if cwd := a.config.workingDir(); cwd != "" {
 		a.warnSkillTriggers(loadedSkillsForDir(cwd))
 	}
-	return nil
 }
 
 // RebuildWithModel recreates the agent's internal runner with a new LLM while
@@ -623,13 +770,20 @@ func (a *Agent) RebuildWithModel(llm model.LLM) error {
 	cfg := a.config
 	cfg.Model = llm
 
-	// Reconstruct the instruction the same way New() does.
+	// Reconstruct the instruction the same way New() does. An injected
+	// InstructionParts overrides the plain-string assembly: the prompt is
+	// the fully recomposed injection string, so no fallback or cwd line is
+	// appended on top of it.
 	instruction := cfg.Instruction
-	if instruction == "" {
-		instruction = SystemInstruction
-	}
-	if cwd := cfg.workingDir(); cwd != "" {
-		instruction += fmt.Sprintf("\nCurrent working directory: %s\n", cwd)
+	if cfg.InstructionParts == nil {
+		if instruction == "" {
+			instruction = SystemInstruction
+		}
+		if cwd := cfg.workingDir(); cwd != "" {
+			instruction += fmt.Sprintf("\nCurrent working directory: %s\n", cwd)
+		}
+	} else {
+		instruction = *resolveInjectedPrompt(cfg)
 	}
 
 	r, err := buildRunner(cfg, instruction, a.sessionService)
@@ -639,7 +793,7 @@ func (a *Agent) RebuildWithModel(llm model.LLM) error {
 
 	a.runner = r
 	a.config = cfg
-	logContextInventory(a.config.Logger, instruction, nil, a.config.Tools)
+	logContextInventory(a.config.Logger, instruction, a.inventoryParts(), a.config.Tools)
 	return nil
 }
 
@@ -663,9 +817,16 @@ func (a *Agent) RebuildWithSession(agentName, instruction string, llm model.LLM,
 	cfg.BeforeToolCallbacks = beforeTool
 	cfg.AfterToolCallbacks = afterTool
 
-	// Reconstruct the instruction the same way New() does.
-	if cwd := cfg.workingDir(); cwd != "" {
-		instruction += fmt.Sprintf("\nCurrent working directory: %s\n", cwd)
+	// Reconstruct the instruction the same way New() does. An injected
+	// InstructionParts overrides the plain-string assembly: the prompt is
+	// the fully recomposed injection string (Base = the new instruction),
+	// so no cwd line is appended on top of it.
+	if cfg.InstructionParts == nil {
+		if cwd := cfg.workingDir(); cwd != "" {
+			instruction += fmt.Sprintf("\nCurrent working directory: %s\n", cwd)
+		}
+	} else {
+		instruction = *resolveInjectedPrompt(cfg)
 	}
 
 	r, err := buildRunner(cfg, instruction, a.sessionService)
@@ -675,7 +836,7 @@ func (a *Agent) RebuildWithSession(agentName, instruction string, llm model.LLM,
 
 	a.runner = r
 	a.config = cfg
-	logContextInventory(a.config.Logger, instruction, nil, a.config.Tools)
+	logContextInventory(a.config.Logger, instruction, a.inventoryParts(), a.config.Tools)
 	return nil
 }
 
