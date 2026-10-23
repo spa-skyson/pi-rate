@@ -21,8 +21,9 @@ func TestToolStatus_EmptyPalace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PalaceTools: %v", err)
 	}
-	if len(tools) != 11 {
-		t.Fatalf("expected 11 tools, got %d", len(tools))
+	// 11 base tools + palace-add-lesson.
+	if len(tools) != 12 {
+		t.Fatalf("expected 12 tools, got %d", len(tools))
 	}
 
 	out, err := palaceStatusHandler(context.Background(), p)
