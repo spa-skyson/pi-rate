@@ -172,11 +172,14 @@ func TestLiveRunner_BuildConfig(t *testing.T) {
 				t.Fatalf("copyDir: %v", err)
 			}
 			sessionsDir := filepath.Join(lr.Root, tc.name+"-sessions")
-			cfg, log, err := lr.buildConfig(Variant{Name: tc.name, Parts: tc.parts}, ws, sessionsDir)
+			cfg, closer, err := lr.buildConfig(Variant{Name: tc.name, Parts: tc.parts}, ws, sessionsDir)
 			if err != nil {
 				t.Fatalf("buildConfig: %v", err)
 			}
-			defer func() { _ = log.Close() }()
+			// The config holds the sandbox's open root over ws and the
+			// logger's open session log; both must be released before the
+			// outer t.TempDir cleanup removes lr.Root (Windows is strict).
+			t.Cleanup(closer)
 
 			if cfg.Model != lr.Model {
 				t.Error("config must carry the runner's model")

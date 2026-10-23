@@ -132,16 +132,20 @@ func (lr *LiveRunner) RunArm(ctx context.Context, v Variant, runs int) (ArmResul
 // session under sessionsDir. The returned total is the run's prompt inventory
 // size parsed from the session log the run's logger wrote.
 func (lr *LiveRunner) runOnce(ctx context.Context, v Variant, ws, sessionsDir string) (RunResult, int, error) {
-	cfg, log, err := lr.buildConfig(v, ws, sessionsDir)
+	cfg, closer, err := lr.buildConfig(v, ws, sessionsDir)
 	if err != nil {
 		return RunResult{}, 0, err
 	}
+	// The inventory line is read from the session log after the run; the path
+	// is captured before closer runs, since cfg.Logger is only valid until
+	// then.
+	logPath := cfg.Logger.Path()
 	a, err := agent.New(cfg)
 	if err != nil {
-		_ = log.Close()
+		closer()
 		return RunResult{}, 0, fmt.Errorf("agent.New: %w", err)
 	}
-	defer func() { _ = log.Close() }()
+	defer closer()
 
 	task := lr.Task
 	if task == "" {
@@ -186,8 +190,10 @@ func (lr *LiveRunner) runOnce(ctx context.Context, v Variant, ws, sessionsDir st
 	}
 	// The context-inventory line lands in the session log this run wrote —
 	// the file the logger itself names (its HOME-scoped path), not anything
-	// derived from the sessions dir.
-	total, err := InventoryTotalFromLog(log.Path())
+	// derived from the sessions dir. Reading it after closer released the
+	// descriptor is fine: only the path is needed, the file is flushed by
+	// logger.Close.
+	total, err := InventoryTotalFromLog(logPath)
 	if err != nil {
 		return RunResult{}, 0, err
 	}
@@ -198,20 +204,25 @@ func (lr *LiveRunner) runOnce(ctx context.Context, v Variant, ws, sessionsDir st
 // arm's workspace copy, the core tool set, the step-limit callback and a
 // FileService rooted at the arm's own sessions directory. Parts nil = the
 // file-driven assembly the production drivers run (control); non-nil = the
-// injected parts (variant). The logger comes back separately: it owns the
-// session log path the inventory line is read from.
-func (lr *LiveRunner) buildConfig(v Variant, ws, sessionsDir string) (agent.Config, *logger.Logger, error) {
+// injected parts (variant). The sandbox and the logger come back as a single
+// closer the caller must run after the config's last use: the sandbox owns an
+// open root over the arm's workspace and the logger owns the session log
+// path the inventory line is read from, and both hold their descriptors past
+// the config's lifetime. On a returned error the caller owns nothing.
+func (lr *LiveRunner) buildConfig(v Variant, ws, sessionsDir string) (agent.Config, func(), error) {
 	sb, err := tools.NewSandbox(ws)
 	if err != nil {
 		return agent.Config{}, nil, fmt.Errorf("NewSandbox(%s): %w", ws, err)
 	}
 	coreTools, err := tools.CoreTools(sb)
 	if err != nil {
+		_ = sb.Close()
 		return agent.Config{}, nil, fmt.Errorf("CoreTools: %w", err)
 	}
 	chain := extension.ComposeAfterToolChain([]llmagent.AfterToolCallback{agent.NewStepLimitCallback(liveStepLimit)})
 	svc, err := pisession.NewFileService(sessionsDir)
 	if err != nil {
+		_ = sb.Close()
 		return agent.Config{}, nil, fmt.Errorf("NewFileService(%s): %w", sessionsDir, err)
 	}
 
@@ -226,6 +237,7 @@ func (lr *LiveRunner) buildConfig(v Variant, ws, sessionsDir string) (agent.Conf
 
 	log, err := logger.New()
 	if err != nil {
+		_ = sb.Close()
 		return agent.Config{}, nil, fmt.Errorf("logger.New: %w", err)
 	}
 
@@ -237,7 +249,10 @@ func (lr *LiveRunner) buildConfig(v Variant, ws, sessionsDir string) (agent.Conf
 		AfterToolCallbacks: chain,
 		Logger:             log,
 		InstructionParts:   &parts,
-	}, log, nil
+	}, func() {
+		_ = log.Close()
+		_ = sb.Close()
+	}, nil
 }
 
 // workspaceTemplate seeds (once) and returns the shared workspace source
