@@ -95,6 +95,31 @@ func TestPalaceAddLessonTool_CompleteStoresLesson(t *testing.T) {
 	}
 }
 
+func TestPalaceAddLessonTool_OverLongFieldRejected(t *testing.T) {
+	p := newLessonPalace(t)
+
+	out, err := palaceAddLessonHandler(context.Background(), p, AddLessonToolInput{
+		Wing:       "proj",
+		Room:       "lessons",
+		Cue:        strings.Repeat("c", LessonMaxCueChars+1),
+		Lesson:     "body",
+		Evidence:   "evidence",
+		Confidence: "high",
+	})
+	if err != nil {
+		t.Fatalf("palaceAddLessonHandler: %v", err)
+	}
+	if !strings.Contains(out.Content, "cue") || !strings.Contains(out.Content, "120") {
+		t.Errorf("tool output %q does not name the over-long field and its limit", out.Content)
+	}
+	if out.ID != "" {
+		t.Errorf("tool output ID = %q, want empty on rejection", out.ID)
+	}
+	if n := drawerCount(t, p); n != 0 {
+		t.Fatalf("palace holds %d drawers after a rejected over-long write, want 0", n)
+	}
+}
+
 func TestPalaceTools_IncludesAddLesson(t *testing.T) {
 	p := newLessonPalace(t)
 	tools, err := PalaceTools(p)

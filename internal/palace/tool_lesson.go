@@ -37,7 +37,11 @@ func newPalaceAddLessonTool(p *Palace) (tool.Tool, error) {
 		Description: "Store a transferable lesson as a structured palace drawer. " +
 			"Requires wing, room, cue (when the lesson applies), lesson (what to do), " +
 			"and evidence (what it is based on) — the write is rejected naming every " +
-			"missing field, and confidence is the free-form annotation.",
+			"missing field, and confidence is the free-form annotation. " +
+			"Field caps: cue <= 120, lesson <= 300, evidence <= 300, confidence <= 60 " +
+			"characters — over-long fields are rejected with the field name and limit. " +
+			"Warning: there is no rate limit on this tool; avoid bulk-writing " +
+			"low-value lessons — prefer one distilled lesson over many near-duplicates.",
 	}, func(ctx agent.Context, input AddLessonToolInput) (AddLessonToolOutput, error) {
 		return palaceAddLessonHandler(ctx, p, input)
 	})

@@ -2,6 +2,7 @@ package palace
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -217,6 +218,119 @@ func TestValidateLesson_MissingFieldsInOneError(t *testing.T) {
 	}
 }
 
+func TestValidateLesson_FieldTooLong(t *testing.T) {
+	tests := []struct {
+		name     string
+		field    string
+		maxChars int
+		lesson   Lesson
+		wantErr  bool
+	}{
+		{
+			name:     "cue over 120 chars",
+			field:    "cue",
+			maxChars: LessonMaxCueChars,
+			lesson: Lesson{
+				Cue:        strings.Repeat("а", LessonMaxCueChars+1),
+				Lesson:     "l",
+				Evidence:   "e",
+				Confidence: "high",
+			},
+			wantErr: true,
+		},
+		{
+			name:     "lesson over 300 chars",
+			field:    "lesson",
+			maxChars: LessonMaxLessonChars,
+			lesson: Lesson{
+				Cue:        "c",
+				Lesson:     strings.Repeat("x", LessonMaxLessonChars+1),
+				Evidence:   "e",
+				Confidence: "high",
+			},
+			wantErr: true,
+		},
+		{
+			name:     "evidence over 300 chars",
+			field:    "evidence",
+			maxChars: LessonMaxEvidenceChars,
+			lesson: Lesson{
+				Cue:        "c",
+				Lesson:     "l",
+				Evidence:   strings.Repeat("x", LessonMaxEvidenceChars+1),
+				Confidence: "high",
+			},
+			wantErr: true,
+		},
+		{
+			name:     "confidence over 60 chars",
+			field:    "confidence",
+			maxChars: LessonMaxConfidenceChars,
+			lesson: Lesson{
+				Cue:        "c",
+				Lesson:     "l",
+				Evidence:   "e",
+				Confidence: strings.Repeat("x", LessonMaxConfidenceChars+1),
+			},
+			wantErr: true,
+		},
+		{
+			name:     "multi-byte runes count as one char, at-cap passes",
+			field:    "confidence",
+			maxChars: LessonMaxConfidenceChars,
+			lesson: Lesson{
+				Cue:        "c",
+				Lesson:     "l",
+				Evidence:   "e",
+				Confidence: strings.Repeat("ы", LessonMaxConfidenceChars), // exactly at the cap
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateLesson(tt.lesson)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateLesson() = nil, want an error naming %q", tt.field)
+				}
+				if !strings.Contains(err.Error(), tt.field+" is") {
+					t.Errorf("error %q does not name field %q", err, tt.field)
+				}
+				if !strings.Contains(err.Error(), fmt.Sprintf("limit %d", tt.maxChars)) {
+					t.Errorf("error %q does not state the limit %d", err, tt.maxChars)
+				}
+				// Only the offending field is reported.
+				for _, other := range []string{"cue", "lesson", "evidence", "confidence"} {
+					if other == tt.field {
+						continue
+					}
+					if strings.Contains(err.Error(), other+" is") {
+						t.Errorf("error %q wrongly flags field %q", err, other)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateLesson() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidateLesson_AtTheCapIsAccepted(t *testing.T) {
+	atCap := Lesson{
+		Cue:        strings.Repeat("c", LessonMaxCueChars),
+		Lesson:     strings.Repeat("l", LessonMaxLessonChars),
+		Evidence:   strings.Repeat("e", LessonMaxEvidenceChars),
+		Confidence: strings.Repeat("h", LessonMaxConfidenceChars),
+	}
+	if err := ValidateLesson(atCap); err != nil {
+		t.Fatalf("ValidateLesson(fields at cap) = %v, want nil", err)
+	}
+}
+
 func TestValidateLesson_Complete(t *testing.T) {
 	if err := ValidateLesson(fullLesson()); err != nil {
 		t.Fatalf("ValidateLesson(full lesson) = %v, want nil", err)
@@ -291,6 +405,22 @@ func TestAddLesson_GateRejectsIncomplete(t *testing.T) {
 func TestAddLesson_CompleteStoresFormattedDrawer(t *testing.T) {
 	p := newLessonPalace(t)
 	ctx := context.Background()
+
+	_, err := p.AddLesson(ctx, DrawerInput{Wing: "proj", Room: "lessons", Importance: 7}, Lesson{
+		Cue:        strings.Repeat("c", LessonMaxCueChars+5),
+		Lesson:     fullLesson().Lesson,
+		Evidence:   fullLesson().Evidence,
+		Confidence: fullLesson().Confidence,
+	})
+	if err == nil {
+		t.Fatal("AddLesson(over-long cue) = nil error, want a gate rejection")
+	}
+	if !strings.Contains(err.Error(), "cue") {
+		t.Errorf("error %q does not name the over-long field %q", err, "cue")
+	}
+	if n := drawerCount(t, p); n != 0 {
+		t.Fatalf("palace holds %d drawers after a rejected over-long write, want 0", n)
+	}
 
 	drawer, err := p.AddLesson(ctx, DrawerInput{Wing: "proj", Room: "lessons", Importance: 7}, fullLesson())
 	if err != nil {
@@ -391,6 +521,74 @@ func TestLessonsBefore_PrefixOnly(t *testing.T) {
 	if lessons[0] == after {
 		t.Fatal("lesson created after the cutoff leaked into the result")
 	}
+}
+
+// lessonDrawerFor inserts a lesson drawer with the given wing and pinned
+// creation time, mirroring a lesson written by an earlier session.
+func lessonDrawerFor(t *testing.T, p *Palace, wing string, l Lesson, createdAt time.Time) {
+	t.Helper()
+	d := &Drawer{
+		ID:         fmt.Sprintf("drawer_%s_%s", wing, l.Cue),
+		Wing:       wing,
+		Room:       "lessons",
+		Content:    FormatLesson(l),
+		Importance: 5,
+		CreatedAt:  createdAt,
+	}
+	if err := p.store.InsertDrawer(context.Background(), d); err != nil {
+		t.Fatalf("InsertDrawer(%s): %v", d.ID, err)
+	}
+}
+
+func TestLessonsBefore_WingFilter(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	projLesson := Lesson{
+		Cue:        "proj cue",
+		Lesson:     "proj lesson body",
+		Evidence:   "proj evidence",
+		Confidence: "high",
+	}
+	otherLesson := Lesson{
+		Cue:        "other cue",
+		Lesson:     "other lesson body",
+		Evidence:   "other evidence",
+		Confidence: "high",
+	}
+	cutoff := time.Now().Add(time.Hour) // both lessons predate the cutoff
+	lessonDrawerFor(t, newPalaceWithStoreForTest(t, store), "proj", projLesson, cutoff.Add(-2*time.Hour))
+	lessonDrawerFor(t, newPalaceWithStoreForTest(t, store), "other", otherLesson, cutoff.Add(-time.Hour))
+
+	ms := NewMemoryStack(store, nil, DefaultConfig())
+
+	t.Run("empty wing keeps every wing", func(t *testing.T) {
+		got, err := ms.WakeUpAt(ctx, "", cutoff)
+		if err != nil {
+			t.Fatalf("WakeUpAt: %v", err)
+		}
+		if !strings.Contains(got, projLesson.Cue) || !strings.Contains(got, otherLesson.Cue) {
+			t.Errorf("WakeUpAt(wing=\"\") = %q, want lessons from both wings", got)
+		}
+	})
+
+	t.Run("named wing excludes other wings", func(t *testing.T) {
+		got, err := ms.WakeUpAt(ctx, "proj", cutoff)
+		if err != nil {
+			t.Fatalf("WakeUpAt: %v", err)
+		}
+		if !strings.Contains(got, projLesson.Cue) {
+			t.Errorf("WakeUpAt(wing=\"proj\") = %q, want the proj lesson", got)
+		}
+		if strings.Contains(got, otherLesson.Cue) {
+			t.Errorf("WakeUpAt(wing=\"proj\") leaked a lesson from another wing:\n%s", got)
+		}
+	})
+}
+
+func newPalaceWithStoreForTest(t *testing.T, store PalaceStore) *Palace {
+	t.Helper()
+	return NewWithStore(store, nil)
 }
 
 func TestLessonsBefore_EmptyPalace(t *testing.T) {

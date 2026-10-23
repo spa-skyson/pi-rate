@@ -1796,9 +1796,9 @@ func setupPalace(cfg config.Config, memWorker *memory.Worker) ([]adktool.Tool, s
 	}
 
 	// Issue 81, prefix-only: the wake-up snapshot is the session's context
-	// injection point. Cutoff is this call's time — the session-start moment,
-	// since setupPalace runs during agent/session wiring; lessons written
-	// later must not leak into their own session's prompt.
+	// injection point. Cutoff is this wiring moment — it precedes any tool
+	// call, so lessons written during the session are excluded from its own
+	// prompt.
 	var wakeUpContext string
 	if wakeUp, wErr := p.WakeUpAt(context.Background(), "", time.Now()); wErr == nil {
 		wakeUpContext = wakeUp

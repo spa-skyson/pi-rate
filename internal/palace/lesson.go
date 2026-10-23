@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Lesson is the structured harness2-style lesson carried inside a palace
@@ -34,20 +35,32 @@ type Lesson struct {
 // a drawer's content.
 const LessonSectionHeader = "## Lesson"
 
-// lessonField is one lesson field: its serialized label, an accessor, and a
-// setter. The slice below fixes both the on-disk field order and the order
-// fields are named in validation errors.
+// Lesson field length caps, enforced at write time by ValidateLesson and again
+// at render time by renderLessons (defense in depth: the store may hold
+// lessons written before the caps existed, or written through other paths).
+// Limits are in characters (runes).
+const (
+	LessonMaxCueChars        = 120
+	LessonMaxLessonChars     = 300
+	LessonMaxEvidenceChars   = 300
+	LessonMaxConfidenceChars = 60
+)
+
+// lessonField is one lesson field: its serialized label, an accessor, a
+// setter, and its write-time length cap. The slice below fixes both the
+// on-disk field order and the order fields are named in validation errors.
 type lessonField struct {
-	label string
-	get   func(Lesson) string
-	set   func(*Lesson, string)
+	label    string
+	maxChars int
+	get      func(Lesson) string
+	set      func(*Lesson, string)
 }
 
 var lessonFields = []lessonField{
-	{"cue", func(l Lesson) string { return l.Cue }, func(l *Lesson, v string) { l.Cue = v }},
-	{"lesson", func(l Lesson) string { return l.Lesson }, func(l *Lesson, v string) { l.Lesson = v }},
-	{"evidence", func(l Lesson) string { return l.Evidence }, func(l *Lesson, v string) { l.Evidence = v }},
-	{"confidence", func(l Lesson) string { return l.Confidence }, func(l *Lesson, v string) { l.Confidence = v }},
+	{"cue", LessonMaxCueChars, func(l Lesson) string { return l.Cue }, func(l *Lesson, v string) { l.Cue = v }},
+	{"lesson", LessonMaxLessonChars, func(l Lesson) string { return l.Lesson }, func(l *Lesson, v string) { l.Lesson = v }},
+	{"evidence", LessonMaxEvidenceChars, func(l Lesson) string { return l.Evidence }, func(l *Lesson, v string) { l.Evidence = v }},
+	{"confidence", LessonMaxConfidenceChars, func(l Lesson) string { return l.Confidence }, func(l *Lesson, v string) { l.Confidence = v }},
 }
 
 // FormatLesson renders the lesson as a fixed-layout markdown section:
@@ -152,29 +165,37 @@ func lessonFieldValue(section, label string) (string, bool) {
 	return "", false
 }
 
-// ValidateLesson reports every missing lesson field in one error, so the
+// ValidateLesson reports every lesson-field violation in one error, so the
 // writer fixes the whole note at once instead of discovering the gaps one
-// rejection at a time (issue 81). Whitespace-only counts as absent.
+// rejection at a time (issue 81). Whitespace-only counts as absent; a field
+// longer than its cap (LessonMax*Chars) is rejected with the field name and
+// the limit — a write-time error beats silent truncation on read.
 func ValidateLesson(l Lesson) error {
-	var missing []string
+	var problems []string
 	for _, f := range lessonFields {
-		if strings.TrimSpace(f.get(l)) == "" {
-			missing = append(missing, f.label)
+		v := f.get(l)
+		if strings.TrimSpace(v) == "" {
+			problems = append(problems, f.label)
+			continue
+		}
+		if n := utf8.RuneCountInString(v); n > f.maxChars {
+			problems = append(problems, fmt.Sprintf("%s is %d chars, limit %d", f.label, n, f.maxChars))
 		}
 	}
-	if len(missing) == 0 {
+	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("palace: lesson missing required fields: %s", strings.Join(missing, ", "))
+	return fmt.Errorf("palace: invalid lesson: %s", strings.Join(problems, "; "))
 }
 
 // AddLesson is the gated write path for lessons: it validates the lesson,
 // embeds it into the drawer content, and stores the drawer through AddDrawer.
 // The gate sits here, in front of the single store path, so every consumer —
 // the palace-add-lesson tool and any CLI code writing lessons — shares one
-// validation. A lesson with a missing field is rejected before embedding or
-// dedup work is spent on it. input.Wing/Room/Hall/SourceFile/Importance are
-// honored; input.Content is overwritten with the formatted lesson.
+// validation. A lesson with a missing or over-long field is rejected before
+// embedding or dedup work is spent on it. input.Wing/Room/Hall/SourceFile/
+// Importance are honored; input.Content is overwritten with the formatted
+// lesson.
 func (p *Palace) AddLesson(ctx context.Context, input DrawerInput, l Lesson) (*Drawer, error) {
 	if err := ValidateLesson(l); err != nil {
 		return nil, err

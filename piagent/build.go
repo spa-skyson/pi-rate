@@ -390,9 +390,9 @@ func setupPalace(o options, cfg config.Config, worker *memory.Worker) ([]adktool
 		palaceTools = nil
 	}
 	var wakeUp string
-	// Issue 81, prefix-only: cutoff is this call's time — setupPalace runs
-	// during agent wiring, so it is the session-start moment; lessons created
-	// later must not leak into their own session's prompt.
+	// Issue 81, prefix-only: cutoff is this wiring moment — it precedes any
+	// tool call, so lessons written during the session are excluded from its
+	// own prompt.
 	if text, wErr := p.WakeUpAt(context.Background(), "", time.Now()); wErr == nil {
 		wakeUp = text
 	}
