@@ -388,9 +388,11 @@ func compactGitDiffText(s string, cfg CompactorConfig) (string, bool) {
 	}
 
 	c := &diffTextCompactor{cfg: cfg}
+	cutByLimit := false
 	for i, line := range lines {
 		c.srcIndex = i
 		if c.totalLines >= cfg.MaxDiffLines {
+			cutByLimit = true
 			break
 		}
 		c.consume(line)
@@ -400,13 +402,15 @@ func compactGitDiffText(s string, cfg CompactorConfig) (string, bool) {
 	c.flushHunkNote()
 	c.flushFile()
 
-	if c.srcIndex < len(lines) {
+	// Only a stop on the total line limit is a real cut. A loop that runs off
+	// the end of the input — the hunk cap consumed everything, so totalLines
+	// never reached MaxDiffLines — has no omitted tail: srcIndex then points
+	// at the last consumed line, and writing a marker here would report the
+	// final line as omitted though it was fully emitted.
+	if cutByLimit && c.srcIndex < len(lines) {
 		// Slice by srcIndex — the position the loop stopped at — not by
 		// totalLines: consumed-but-unemitted hunk lines belong to the kept
 		// side's accounting already, so the marker names the true remainder.
-		// srcIndex == len(lines) cannot happen: the loop breaks by totalLines
-		// before consuming the last line only when that line would push
-		// totalLines past the cap, i.e. the cut is real.
 		omitted := strings.Join(lines[c.srcIndex:], "\n")
 		fmt.Fprintf(&c.b, "\n... (%d lines omitted from diff)\n", len(lines)-c.srcIndex)
 		// The lines count discloses the diff structure; the shared byte marker

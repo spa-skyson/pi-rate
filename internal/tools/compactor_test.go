@@ -334,6 +334,81 @@ func TestCompactGitDiffText_Short(t *testing.T) {
 	}
 }
 
+// TestCompactGitDiffText_HunkCapExhaustsInput covers the natural-exhaustion
+// stop: a hunk cap small enough to keep the emitted total under MaxDiffLines
+// makes the loop run off the end of the input rather than break on the total
+// limit. That is not a cut of the tail — the last line was consumed, and the
+// hunk cap already disclosed what it withheld — so no omitted-tail marker may
+// be written, and the omitted count must not grow by the final line. The raw
+// input carries more lines than MaxDiffLines (35 > 34), so the early return
+// is passed and the loop really runs; the emitted total stops at 8.
+func TestCompactGitDiffText_HunkCapExhaustsInput(t *testing.T) {
+	cfg := DefaultCompactorConfig()
+	cfg.MaxDiffLines = 34
+	cfg.MaxDiffHunkLines = 3
+
+	var lines []string
+	lines = append(lines, "diff --git a/big.go b/big.go", "index 111..222 100644", "--- a/big.go", "+++ b/big.go", "@@ -1,20 +1,20 @@")
+	// 30 body lines, 27 of them dropped by the hunk cap.
+	for i := range 30 {
+		lines = append(lines, fmt.Sprintf("+added line %02d", i))
+	}
+	input := strings.Join(lines, "\n")
+
+	got, applied := compactGitDiffText(input, cfg)
+	if !applied {
+		t.Fatal("compaction must apply: the hunk cap cuts 27 of 30 body lines")
+	}
+	// The hunk-cap note discloses the withheld lines…
+	if !strings.Contains(got, "(27 additions truncated)") {
+		t.Errorf("hunk-cap note missing:\n%s", got)
+	}
+	// …and no omitted tail exists: the loop consumed everything, so the last
+	// input line sits in the kept set at the hunk cut, not in a dropped tail.
+	if strings.Contains(got, "lines omitted from diff") {
+		t.Errorf("natural exhaustion must not write an omitted-tail marker:\n%s", got)
+	}
+	if strings.Contains(got, "bytes truncated") {
+		t.Errorf("natural exhaustion has no byte cut to disclose:\n%s", got)
+	}
+}
+
+// TestCompactGitDiffText_LimitCutStillMarks keeps the sibling case honest:
+// when the loop really does stop on MaxDiffLines — a second hunk is being
+// emitted when the kept total reaches the cap — the omitted-tail marker must
+// still be written with the true remainder count.
+func TestCompactGitDiffText_LimitCutStillMarks(t *testing.T) {
+	cfg := DefaultCompactorConfig()
+	cfg.MaxDiffLines = 40
+	cfg.MaxDiffHunkLines = 25
+
+	var lines []string
+	lines = append(lines, "diff --git a/big.go b/big.go", "index 111..222 100644", "--- a/big.go", "+++ b/big.go")
+	lines = append(lines, "@@ -1,25 +1,25 @@")
+	for i := range 25 {
+		lines = append(lines, fmt.Sprintf("+a%02d", i))
+	}
+	lines = append(lines, "@@ -50,30 +50,30 @@")
+	for i := range 30 {
+		lines = append(lines, fmt.Sprintf("+b%02d", i))
+	}
+	input := strings.Join(lines, "\n")
+
+	got, applied := compactGitDiffText(input, cfg)
+	if !applied {
+		t.Fatal("compaction must apply")
+	}
+	if !strings.Contains(got, "lines omitted from diff") {
+		t.Fatalf("a real cut must carry the omitted-tail marker:\n%s", got)
+	}
+	// Kept before the cap: 4 file-header lines + 1 hunk header + 25 a-lines
+	// = 30, then the second hunk header + 9 b-lines reach 40 and the loop
+	// stops with 21 b-lines unconsumed. The marker must name exactly those.
+	if !strings.Contains(got, "(21 lines omitted from diff)") {
+		t.Errorf("omitted count does not match the remainder from the cut:\n%s", got)
+	}
+}
+
 func TestCompactGitLogText(t *testing.T) {
 	cfg := DefaultCompactorConfig()
 

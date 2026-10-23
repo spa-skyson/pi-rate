@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -551,5 +552,76 @@ func TestInventoryPartsSumMatchesPrompt(t *testing.T) {
 	// recovered sections always sum to the whole prompt.
 	if sum := len(got.Base) + len(got.Rules) + len(got.Skills); sum != len(prompt) {
 		t.Errorf("recovered sections sum to %d, want %d (full prompt)", sum, len(prompt))
+	}
+}
+
+// TestSkillHygieneOnInstructionRebuild re-runs the skill-menu hygiene when
+// RebuildWithInstruction rebuilds the runner: a skill created after New
+// (create_skill, plan) changes the loaded set, so the rebuild must see the
+// new misauthored skill and warn for it. The warnedSkills dedup keeps the
+// second rebuild silent.
+func TestSkillHygieneOnInstructionRebuild(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+
+	// A project skill directory with one skill whose description carries no
+	// activation marker. PI_SKILLS_DIRS replaces project discovery with this
+	// one directory, so no repo skill leaks into the run and the notice count
+	// is exact.
+	skillDir := t.TempDir()
+	skillRoot := filepath.Join(skillDir, "mute-skill")
+	if err := os.MkdirAll(skillRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: mute-skill\ndescription: Does things quietly and well.\n---\nbody\n"
+	if err := os.WriteFile(filepath.Join(skillRoot, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PI_SKILLS_DIRS", skillDir)
+
+	cwd := t.TempDir()
+	notices := collectNotices(t)
+
+	a, err := New(Config{
+		Model:       &mockLLM{name: "test-model", response: "ok"},
+		Instruction: "base",
+		WorkingDir:  cwd,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	// New already ran the hygiene pass over the same set, so the mute skill
+	// is warned once here…
+	if hits := countMsgs(notices(), "skill mute-skill:"); hits != 1 {
+		t.Fatalf("after New: got %d warnings, want exactly 1: %q", hits, notices())
+	}
+
+	// …a rebuild over an unchanged set stays silent (dedup)…
+	if err := a.RebuildWithInstruction("rebuilt prompt one"); err != nil {
+		t.Fatalf("RebuildWithInstruction() error: %v", err)
+	}
+	if hits := countMsgs(notices(), "skill mute-skill:"); hits != 1 {
+		t.Errorf("unchanged rebuild must stay deduplicated, got %d warnings: %q", hits, notices())
+	}
+
+	// …and the set the rebuild actually loads is the one on disk: drop the
+	// skill file from the discovery dir and rebuild with a fresh misauthored
+	// skill under a new name, which must earn its own warning.
+	secondRoot := filepath.Join(skillDir, "mute-two")
+	if err := os.MkdirAll(secondRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body2 := "---\nname: mute-two\ndescription: Also has no trigger phrase.\n---\nbody\n"
+	if err := os.WriteFile(filepath.Join(secondRoot, "SKILL.md"), []byte(body2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.RebuildWithInstruction("rebuilt prompt two"); err != nil {
+		t.Fatalf("RebuildWithInstruction() error: %v", err)
+	}
+	if hits := countMsgs(notices(), "skill mute-two:"); hits != 1 {
+		t.Errorf("rebuild must warn for the new skill exactly once, got %d: %q", hits, notices())
+	}
+	if hits := countMsgs(notices(), "skill mute-skill:"); hits != 1 {
+		t.Errorf("old skill must not be re-warned, got %d: %q", hits, notices())
 	}
 }

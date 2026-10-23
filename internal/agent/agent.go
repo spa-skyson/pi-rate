@@ -606,6 +606,13 @@ func (a *Agent) RebuildWithInstruction(instruction string) error {
 	// Same inventory line the other rebuild paths and New() write: a rebuilt
 	// prompt is a new context cost, and the session log must show it.
 	logContextInventory(a.config.Logger, instruction, nil, a.config.Tools)
+	// Re-run skill hygiene on the current skill set: a skill created since New
+	// (create_skill, plan) is first seen here. The warnedSkills dedup keeps
+	// already-warned skills silent, so a rebuild is never noisier than the
+	// first pass.
+	if cwd := a.config.workingDir(); cwd != "" {
+		a.warnSkillTriggers(loadedSkillsForDir(cwd))
+	}
 	return nil
 }
 
