@@ -390,7 +390,10 @@ func setupPalace(o options, cfg config.Config, worker *memory.Worker) ([]adktool
 		palaceTools = nil
 	}
 	var wakeUp string
-	if text, wErr := p.WakeUp(context.Background(), ""); wErr == nil {
+	// Issue 81, prefix-only: cutoff is this wiring moment — it precedes any
+	// tool call, so lessons written during the session are excluded from its
+	// own prompt.
+	if text, wErr := p.WakeUpAt(context.Background(), "", time.Now()); wErr == nil {
 		wakeUp = text
 	}
 	return palaceTools, wakeUp, closePalace

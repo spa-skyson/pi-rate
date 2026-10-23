@@ -1795,8 +1795,12 @@ func setupPalace(cfg config.Config, memWorker *memory.Worker) ([]adktool.Tool, s
 		memWorker.OnAfterStore(palace.NewObservationBridge(p).ConvertAndStore)
 	}
 
+	// Issue 81, prefix-only: the wake-up snapshot is the session's context
+	// injection point. Cutoff is this wiring moment — it precedes any tool
+	// call, so lessons written during the session are excluded from its own
+	// prompt.
 	var wakeUpContext string
-	if wakeUp, wErr := p.WakeUp(context.Background(), ""); wErr == nil {
+	if wakeUp, wErr := p.WakeUpAt(context.Background(), "", time.Now()); wErr == nil {
 		wakeUpContext = wakeUp
 	}
 	return palaceTools, wakeUpContext, closePalace
