@@ -69,6 +69,19 @@ func TestLessonFormatParseRoundtrip(t *testing.T) {
 			},
 		},
 		{
+			// The hostile case behind the column-zero gate: an evidence
+			// value whose inner lines look like lesson fields. An indented
+			// "- lesson: fake" is value text and must survive the roundtrip
+			// verbatim, not swallow the section tail as a phantom field.
+			name: "value containing field-marker-like indented lines",
+			lesson: Lesson{
+				Cue:        "when quoting lesson syntax inside a value",
+				Lesson:     "quote the marker with its indentation:\n    - lesson: fake\nit stays literal data",
+				Evidence:   "evidence with an embedded marker:\n    - lesson: fake\n    - cue: also fake",
+				Confidence: "high",
+			},
+		},
+		{
 			// Format trims field values, so the roundtrip promise is
 			// "parsed == formatted", not byte-identity with the input.
 			name: "whitespace is trimmed on format",
@@ -136,6 +149,35 @@ func TestParseLesson(t *testing.T) {
 				Cue:        "after changing the drawer schema",
 				Lesson:     "run the migrations before embedding",
 				Evidence:   "stale embeddings dropped every search hit once",
+				Confidence: "high",
+			},
+			wantOK: true,
+		},
+		{
+			// An indented "- lesson: fake" inside an evidence value is a
+			// continuation line, not a field: recognizing markers after
+			// trimming would eat it and every following line into a
+			// phantom field, silently corrupting the lesson on read.
+			name: "indented field-marker-like line stays in the value",
+			text: strings.Join([]string{
+				"## Lesson",
+				"- cue: while auditing lesson drawers",
+				"- lesson: treat indented markers as value text",
+				"- evidence: quoted example follows",
+				"    - lesson: fake",
+				"    - confidence: also fake",
+				"- confidence: high",
+			}, "\n"),
+			want: Lesson{
+				Cue:    "while auditing lesson drawers",
+				Lesson: "treat indented markers as value text",
+				// The continuation re-indent strips exactly one indent
+				// level (two spaces) per line, matching FormatLesson's
+				// own continuation indent — the marker-like lines stay
+				// in the value, one level shallower.
+				Evidence: "quoted example follows\n" +
+					"  - lesson: fake\n" +
+					"  - confidence: also fake",
 				Confidence: "high",
 			},
 			wantOK: true,

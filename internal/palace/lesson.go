@@ -142,15 +142,22 @@ func cutLessonSection(text string) (string, bool) {
 
 // lessonFieldValue extracts one "- <label>:" field from a section body,
 // including its indented continuation lines.
+//
+// A field marker is recognized only at column zero: the check runs on the
+// raw line, before any trimming, so an indented "- <label>:" inside a
+// value — a continuation line a hand-edited or embedded markdown value can
+// carry — stays part of the value instead of silently swallowing the rest
+// of the section as a phantom field. FormatLesson indents continuation
+// lines by two spaces (indentContinuation), so its own output parses back
+// exactly; anything at column zero inside a value ends the value.
 func lessonFieldValue(section, label string) (string, bool) {
 	prefix := "- " + label + ":"
 	lines := strings.Split(section, "\n")
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, prefix) {
+		if !strings.HasPrefix(line, prefix) {
 			continue
 		}
-		value := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		value := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 		for j := i + 1; j < len(lines); j++ {
 			next := lines[j]
 			// Continuation lines are indented by FormatLesson; anything at
