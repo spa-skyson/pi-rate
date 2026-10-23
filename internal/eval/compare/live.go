@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -317,6 +318,87 @@ func mergeMetrics(dst, src eval.TrajectoryMetrics) eval.TrajectoryMetrics {
 		dst.MaxDepth = src.MaxDepth
 	}
 	return dst
+}
+
+// StoreDir is where the live driver caches finished comparisons: a
+// ".harness-compare" directory in the repository root, found by walking up
+// from the working directory until a go.mod is reached. Walk-up keeps the
+// driver correct from any working directory, including the package dir the
+// test binary runs in.
+func StoreDir() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("compare: resolving store dir: %w", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(wd, "go.mod")); err == nil {
+			return filepath.Join(wd, storeDirName), nil
+		}
+		parent := filepath.Dir(wd)
+		if parent == wd {
+			return "", fmt.Errorf("compare: resolving store dir: no go.mod above %s", wd)
+		}
+		wd = parent
+	}
+}
+
+// storeDirName is the repository-root cache directory the live driver saves
+// finished comparisons under.
+const storeDirName = ".harness-compare"
+
+// compareWithStore runs Compare with run-store reuse (harness2 rule P11): a
+// comparison whose fingerprint pair is already on disk in dir is reused
+// instead of re-executed — the Runner is not called at all — and a fresh
+// comparison is saved back for the next invocation. The fingerprint pair is
+// computed up front (the same hashes Compare derives), so the reuse check
+// precedes any execution. The boolean reports the reuse; both it and the
+// file name go to stdout, since that is the signal a caller watches the
+// console for.
+func compareWithStore(ctx context.Context, control, variant Variant, r Runner, runs int, dir string) (CompareResult, bool, error) {
+	store := NewStore(dir)
+	fp := [2]string{Fingerprint(control), Fingerprint(variant)}
+	if store.Has(fp) {
+		cached, ok, err := store.Load(fp)
+		if err != nil {
+			fmt.Printf("compare: stored run unusable (%v) — running fresh\n", err)
+		} else if ok {
+			fmt.Printf("reused %s.json\n", fp[0]+"-"+fp[1])
+			return cached, true, nil
+		}
+	}
+	res, err := Compare(ctx, control, variant, r, runs)
+	if err != nil {
+		return CompareResult{}, false, err
+	}
+	if err := store.Save(res); err != nil {
+		return CompareResult{}, false, fmt.Errorf("compare: saving run for reuse: %w", err)
+	}
+	return res, false, nil
+}
+
+// blindSeedEnv is the environment variable overriding the blind shuffle seed.
+const blindSeedEnv = "PI_HARNESS_AB_SEED"
+
+// defaultBlindSeed is the shuffle seed a blind report uses when the seed
+// environment variable is unset.
+const defaultBlindSeed = 1
+
+// blindReport renders the comparison report for blind judging: the arm
+// names are anonymized by Anonymize before rendering, so the report cannot
+// say which arm is the control. The seed is fixed (default 1, override via
+// PI_HARNESS_AB_SEED), making the A/B assignment deterministic: same seed,
+// same assignment.
+func blindReport(res CompareResult) string {
+	seed := int64(defaultBlindSeed)
+	if v := os.Getenv(blindSeedEnv); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			fmt.Printf("compare: %s=%q is not a positive integer — using seed %d\n", blindSeedEnv, v, seed)
+		} else {
+			seed = n
+		}
+	}
+	return Render(Anonymize(res, seed))
 }
 
 // NewLiveModel resolves the live model the arms run on: the first candidate

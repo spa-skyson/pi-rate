@@ -279,14 +279,28 @@ func TestLiveCompare(t *testing.T) {
 		Label: "Count the files in the current directory and tell me the number.",
 	}
 
-	res, err := Compare(ctx, control, variant, lr, runs)
+	// Run-store reuse: a comparison of these exact variants that already
+	// finished is loaded from .harness-compare/ instead of re-run, and a
+	// fresh one is saved for the next invocation.
+	storeDir, err := StoreDir()
+	if err != nil {
+		t.Fatalf("StoreDir: %v", err)
+	}
+	res, reused, err := compareWithStore(ctx, control, variant, lr, runs, storeDir)
 	if err != nil {
 		t.Fatalf("Compare: %v", err)
 	}
+	t.Logf("run store: %s (reused=%v)", storeDir, reused)
 
 	report := Render(res)
 	t.Logf("live model: %s, runs=%d per arm", modelName, runs)
 	t.Logf("comparison report:\n%s", report)
+
+	// Blind mode (PI_HARNESS_AB_BLIND=1): log the anonymized report next to
+	// the named one — the blind copy is what a judge would see.
+	if os.Getenv("PI_HARNESS_AB_BLIND") == "1" {
+		t.Logf("blind report:\n%s", blindReport(res))
+	}
 
 	if strings.TrimSpace(report) == "" {
 		t.Fatal("Render must produce a non-empty report")
@@ -298,5 +312,104 @@ func TestLiveCompare(t *testing.T) {
 		if fp == "" {
 			t.Errorf("fingerprint[%d] is empty", i)
 		}
+	}
+}
+
+// TestCompareWithStore_Reuse pins the wiring between the comparison core and
+// the run Store: the first call runs the Runner and saves, the second call
+// for the same variants must be served entirely from the store — the Runner
+// is never invoked and the loaded result equals the saved one. A different
+// fingerprint pair must not reuse anything. Uses a throwaway store dir, so
+// the repository-root cache is untouched.
+func TestCompareWithStore_Reuse(t *testing.T) {
+	dir := t.TempDir()
+	runner := &fakeRunner{arms: map[string]ArmResult{
+		"control": buildArm(armSpec{name: "control", steps: 10, calls: map[string]int{"read": 4}}),
+		"variant": buildArm(armSpec{name: "variant", steps: 8, calls: map[string]int{"read": 6}}),
+	}}
+
+	res1, reused1, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 5, dir)
+	if err != nil {
+		t.Fatalf("first compareWithStore: %v", err)
+	}
+	if reused1 {
+		t.Error("first run must not report reuse")
+	}
+	if got := len(runner.calls); got != 2 {
+		t.Fatalf("first run: runner called %d time(s), want 2", got)
+	}
+
+	// The store now holds the comparison; a second call must not reach the
+	// runner.
+	res2, reused2, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 5, dir)
+	if err != nil {
+		t.Fatalf("second compareWithStore: %v", err)
+	}
+	if !reused2 {
+		t.Error("second run must report reuse")
+	}
+	if got := len(runner.calls); got != 2 {
+		t.Errorf("second run: runner called %d time(s), want 2 (no re-execution)", got)
+	}
+	if res2.Control.Variant != res1.Control.Variant || res2.Variant.Variant != res1.Variant.Variant {
+		t.Errorf("reused arms drifted: (%q,%q) -> (%q,%q)",
+			res1.Control.Variant, res1.Variant.Variant, res2.Control.Variant, res2.Variant.Variant)
+	}
+	if res2.Fingerprint != res1.Fingerprint {
+		t.Error("reused fingerprint drifted")
+	}
+	if len(res2.Contrasts) != len(res1.Contrasts) {
+		t.Errorf("reused contrast count drifted: %d -> %d", len(res1.Contrasts), len(res2.Contrasts))
+	}
+
+	// A different pair must not be served from the first pair's file.
+	other := Variant{Name: "other", Parts: &agent.InstructionParts{Base: "other base"}}
+	runner2 := &fakeRunner{arms: map[string]ArmResult{
+		"control": buildArm(armSpec{name: "control", steps: 1}),
+		"other":   buildArm(armSpec{name: "other", steps: 2}),
+	}}
+	_, reusedOther, err := compareWithStore(context.Background(), controlVariant(), other, runner2, 5, dir)
+	if err != nil {
+		t.Fatalf("other-pair compareWithStore: %v", err)
+	}
+	if reusedOther {
+		t.Error("a different fingerprint pair must not reuse another pair's stored run")
+	}
+}
+
+// TestBlindReport pins the blind-mode rendering: output stays a valid
+// rendered report while the real arm names disappear from it, and the seed
+// environment variable decides the A/B assignment deterministically.
+// Not parallel: t.Setenv forbids it.
+func TestBlindReport(t *testing.T) {
+	res := mustCompare(t, controlVariant(), variantVariant(),
+		&fakeRunner{arms: map[string]ArmResult{
+			"control": buildArm(armSpec{name: "control", steps: 10, calls: map[string]int{"read": 4}}),
+			"variant": buildArm(armSpec{name: "variant", steps: 8, calls: map[string]int{"read": 6}}),
+		}}, 5)
+
+	blind := blindReport(res)
+	if !strings.Contains(blind, "# Harness comparison") {
+		t.Error("blind report must still be a rendered report")
+	}
+	if strings.Contains(blind, "control") || strings.Contains(blind, "variant") {
+		t.Errorf("blind report must not carry the real arm names:\n%s", blind)
+	}
+
+	// Deterministic in the seed: same env, same assignment.
+	t.Setenv(blindSeedEnv, "42")
+	first := blindReport(res)
+	second := blindReport(res)
+	if first != second {
+		t.Error("same seed must render byte-identically")
+	}
+	if !strings.Contains(first, " A ") && !strings.Contains(first, "A (fingerprint") {
+		t.Errorf("blind report must carry anonymized slot names:\n%s", first)
+	}
+
+	// A non-numeric seed falls back to the default with a note, not an error.
+	t.Setenv(blindSeedEnv, "abc")
+	if fallback := blindReport(res); fallback == "" {
+		t.Error("non-numeric seed must fall back to the default, not break rendering")
 	}
 }
