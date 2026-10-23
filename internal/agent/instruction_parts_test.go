@@ -291,6 +291,71 @@ func TestRebuildWithPartsReplacesPrompt(t *testing.T) {
 	}
 }
 
+// TestInstructionPartsPersistAcrossPlainRebuilds pins the sticky contract:
+// with injected parts set, RebuildWithInstruction recomposes the injected
+// prompt and the new plain instruction does not reach it; clearing
+// InstructionParts on the config returns the agent to plain assembly, where
+// the previously supplied instruction is the prompt.
+func TestInstructionPartsPersistAcrossPlainRebuilds(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+	cwd := t.TempDir()
+
+	const (
+		partsBaseMarker  = "PARTS-BASE-MARKER"
+		partsRulesMarker = "PARTS-RULES-MARKER"
+		plainMarker      = "plain-rebuild-marker"
+	)
+	parts := InstructionParts{
+		Base:   partsBaseMarker,
+		Rules:  rulesSectionMarker + partsRulesMarker,
+		Skills: skillsSectionMarker + "- /sticky: A sticky skill.\n",
+	}
+
+	llm := &capturingLLM{name: "m", response: "ok"}
+	a, err := New(Config{
+		Model:            llm,
+		Instruction:      parts.Base,
+		InstructionParts: &parts,
+		WorkingDir:       cwd,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// With parts set, a plain rebuild must keep the injected prompt: the
+	// marker parts are present and the new instruction is not.
+	if err := a.RebuildWithInstruction(plainMarker); err != nil {
+		t.Fatalf("RebuildWithInstruction() with parts set: %v", err)
+	}
+	if err := runForPrompt(t, a, llm); err != nil {
+		t.Fatal(err)
+	}
+	got := llm.capturedSystemInstruction()
+	if !strings.Contains(got, partsBaseMarker) || !strings.Contains(got, partsRulesMarker) {
+		t.Errorf("sticky rebuild must keep the injected parts, got %q", got)
+	}
+	if strings.Contains(got, plainMarker) {
+		t.Errorf("a plain instruction must NOT reach the prompt while parts are set, got %q", got)
+	}
+
+	// Clearing the parts returns the agent to plain assembly: the same
+	// instruction now lands in the prompt and the parts are gone.
+	a.config.InstructionParts = nil
+	if err := a.RebuildWithInstruction(plainMarker); err != nil {
+		t.Fatalf("RebuildWithInstruction() after clearing parts: %v", err)
+	}
+	if err := runForPrompt(t, a, llm); err != nil {
+		t.Fatal(err)
+	}
+	got = llm.capturedSystemInstruction()
+	if !strings.Contains(got, plainMarker) {
+		t.Errorf("after clearing parts the plain instruction must be applied, got %q", got)
+	}
+	if strings.Contains(got, partsBaseMarker) || strings.Contains(got, partsRulesMarker) {
+		t.Errorf("after clearing parts the injected parts must be gone, got %q", got)
+	}
+}
+
 // TestRebuildWithPartsRunsInventoryAndHygiene mirrors the
 // RebuildWithInstruction guarantees on the parts path: the context inventory
 // line lands in the session log describing the new prompt, and the skill-menu

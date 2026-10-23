@@ -371,6 +371,11 @@ type Config struct {
 	// environment at build time and appended last, so the block stays fresh
 	// and the Base+Rules+Skills+Env ordering is never broken.
 	//
+	// InstructionParts persists across RebuildWithInstruction,
+	// RebuildWithSession and RebuildWithModel — those paths recompose the
+	// injected prompt, so a new plain instruction is NOT applied while parts
+	// are set; clear InstructionParts to return to file/plain assembly.
+	//
 	// Nil (the default) keeps the file-driven behavior byte-for-byte. When
 	// set, the total-budget gate applies to the supplied parts the same way
 	// it applies to a file-assembled prompt: an over-budget build fails
@@ -833,8 +838,9 @@ func (a *Agent) RebuildWithSession(agentName, instruction string, llm model.LLM,
 
 	// Reconstruct the instruction the same way New() does. An injected
 	// InstructionParts overrides the plain-string assembly: the prompt is
-	// the fully recomposed injection string (Base = the new instruction),
-	// so no cwd line is appended on top of it.
+	// the recomposed injection string built from the CURRENT parts — the
+	// supplied instruction waits in cfg.Instruction until the parts are
+	// cleared — so no cwd line is appended on top of it.
 	if cfg.InstructionParts == nil {
 		if cwd := cfg.workingDir(); cwd != "" {
 			instruction += fmt.Sprintf("\nCurrent working directory: %s\n", cwd)
