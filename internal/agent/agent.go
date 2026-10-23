@@ -356,10 +356,15 @@ type Config struct {
 
 	// InstructionParts, when non-nil, replaces the on-disk assembly as the
 	// source of the prompt: buildRunner and the rebuild methods use Base,
-	// Rules and Skills exactly as given instead of reading context files and
-	// the skills menu for the working directory. This is the programmatic
-	// injection point for driving variant prompts (harness A/B runs) without
-	// writing to the filesystem.
+	// Rules and Skills exactly as given — parts.Base is never overridden by
+	// cfg.Instruction — instead of reading context files and the skills menu
+	// for the working directory. This is the programmatic injection point
+	// for driving variant prompts (harness A/B runs) without writing to the
+	// filesystem.
+	//
+	// cfg.Instruction reflects the Base the prompt was built from: New
+	// copies parts.Base into it when it is empty, and RebuildWithParts sets
+	// it to every newly supplied Base after the build succeeds.
 	//
 	// Env from the supplied parts is always ignored: the volatile
 	// "# Runtime Environment" block is recomposed from the live process
@@ -527,11 +532,11 @@ func injectWithFailOpen(ctx adkagent.ReadonlyContext, template string, log *logg
 }
 
 // resolveInjectedPrompt returns the fully assembled prompt an injected
-// Config.InstructionParts produces — Env dropped, the volatile environment
-// block recomposed from the live process environment, "Current working
-// directory" line appended the way New() does. It returns nil unless
-// injection is configured, so every caller can take the plain-string path
-// unchanged.
+// Config.InstructionParts produces — Base, Rules and Skills exactly as
+// supplied, Env dropped and the volatile environment block recomposed from
+// the live process environment, "Current working directory" line appended
+// the way New() does. It returns nil unless injection is configured, so
+// every caller can take the plain-string path unchanged.
 //
 // The cwd line mirrors New(): when an injection overrides the file assembly,
 // there is no place in the string where a file-driven run would have appended
@@ -542,7 +547,6 @@ func resolveInjectedPrompt(cfg Config) *string {
 		return nil
 	}
 	parts := *cfg.InstructionParts
-	parts.Base = cfg.Instruction
 	parts.Env = environmentContext(os.Getenv("HOME"), os.Getenv("USER"), os.Getenv("PWD"), os.Getenv("LANG"), cfg.workingDir())
 	if cwd := cfg.workingDir(); cwd != "" {
 		parts.Base += fmt.Sprintf("\nCurrent working directory: %s\n", cwd)
@@ -592,6 +596,13 @@ func New(cfg Config) (*Agent, error) {
 	// (Env recomposed from the live environment) instead of the file
 	// assembly. Nothing below re-reads context files or the skills menu for
 	// this path — the same prompt buildRunner gates and passes to the runner.
+	// cfg.Instruction mirrors parts.Base so every consumer reading the config
+	// back (inventory attribution, rebuild paths) sees the prompt that was
+	// actually built; the injected prompt uses parts.Base as supplied either
+	// way.
+	if cfg.InstructionParts != nil && cfg.Instruction == "" {
+		cfg.Instruction = cfg.InstructionParts.Base
+	}
 	if injected := resolveInjectedPrompt(cfg); injected != nil {
 		return newWithPrompt(cfg, *injected)
 	}
@@ -700,10 +711,12 @@ func (a *Agent) RebuildWithInstruction(instruction string) error {
 
 // RebuildWithParts recreates the agent's internal runner from a programmatically
 // supplied InstructionParts, by the same contract as the Config.InstructionParts
-// injection: Base+Rules+Skills are used as given, Env is dropped and the
+// injection: Base+Rules+Skills are used exactly as given — the supplied Base
+// replaces whatever cfg.Instruction held — Env is dropped and the
 // volatile environment block is recomposed from the live process environment
-// and appended last. The session service is reused so existing sessions remain
-// accessible.
+// and appended last. On success cfg.Instruction is set to the supplied Base,
+// so the config always mirrors the prompt that was actually built. The
+// session service is reused so existing sessions remain accessible.
 //
 // After the rebuild the same hooks the other rebuild paths run fire: the
 // context inventory line is written to the session log, and the skill-menu
@@ -716,6 +729,7 @@ func (a *Agent) RebuildWithInstruction(instruction string) error {
 func (a *Agent) RebuildWithParts(parts InstructionParts) error {
 	cfg := a.config
 	cfg.InstructionParts = &parts
+	cfg.Instruction = parts.Base
 
 	prompt := a.promptSource(cfg)
 	r, err := buildRunner(cfg, prompt, a.sessionService)

@@ -258,6 +258,9 @@ func TestRebuildWithPartsReplacesPrompt(t *testing.T) {
 	if !strings.Contains(got, "first injected rules") {
 		t.Errorf("rebuild must switch the prompt to the supplied parts, got %q", got)
 	}
+	if !strings.Contains(got, "INJECTED BASE ONE") {
+		t.Errorf("rebuild must carry the supplied Base into the prompt, got %q", got)
+	}
 	if strings.Contains(got, envSectionMarker+"first injected rules") {
 		t.Errorf("supplied Env leaked into the rebuilt prompt: %q", got)
 	}
@@ -277,8 +280,14 @@ func TestRebuildWithPartsReplacesPrompt(t *testing.T) {
 	if !strings.Contains(got, "second injected rules") || strings.Contains(got, "first injected rules") {
 		t.Errorf("second rebuild must fully replace the first assembly, got %q", got)
 	}
+	if !strings.Contains(got, "INJECTED BASE TWO") || strings.Contains(got, "INJECTED BASE ONE") {
+		t.Errorf("second rebuild must carry the new supplied Base, got %q", got)
+	}
 	if a.config.InstructionParts == nil || a.config.InstructionParts.Base != "INJECTED BASE TWO" {
 		t.Errorf("RebuildWithParts must store the last supplied parts on the config: %+v", a.config.InstructionParts)
+	}
+	if a.config.Instruction != "INJECTED BASE TWO" {
+		t.Errorf("cfg.Instruction = %q, want the supplied Base %q", a.config.Instruction, "INJECTED BASE TWO")
 	}
 }
 
@@ -372,6 +381,91 @@ func TestRebuildWithPartsRunsInventoryAndHygiene(t *testing.T) {
 	}
 	if hits := countMsgs(notices(), "skill mute-two:"); hits != 1 {
 		t.Errorf("rebuild must warn for the new skill exactly once, got %d: %q", hits, notices())
+	}
+}
+
+// TestInstructionPartsBaseSuppliedWithoutInstruction drives the "parts are
+// taken as supplied" contract on New: an empty cfg.Instruction must not mute
+// the injected prompt — parts.Base is the prompt's Base as given, and the
+// config mirrors it back.
+func TestInstructionPartsBaseSuppliedWithoutInstruction(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+	cwd := t.TempDir()
+
+	parts := InstructionParts{
+		Base:   "SUPPLIED BASE",
+		Rules:  rulesSectionMarker + "supplied rules",
+		Skills: skillsSectionMarker + "- /sup: A skill.\n",
+	}
+
+	llm := &capturingLLM{name: "m", response: "ok"}
+	a, err := New(Config{
+		Model:            llm,
+		InstructionParts: &parts, // Instruction deliberately empty
+		WorkingDir:       cwd,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if a.config.Instruction != parts.Base {
+		t.Errorf("cfg.Instruction = %q, want the supplied Base %q", a.config.Instruction, parts.Base)
+	}
+	if err := runForPrompt(t, a, llm); err != nil {
+		t.Fatal(err)
+	}
+	got := llm.capturedSystemInstruction()
+	if !strings.Contains(got, "SUPPLIED BASE") {
+		t.Errorf("prompt must carry parts.Base as supplied, got %q", got)
+	}
+	if strings.Contains(got, SystemInstruction) {
+		t.Errorf("empty cfg.Instruction must not fall back to the built-in prompt, got %q", got)
+	}
+}
+
+// TestRebuildWithPartsUpdatesInstruction pins the sync rule: after a
+// RebuildWithParts with a new Base, the runner gets the new Base (not the
+// config's stale cfg.Instruction) and cfg.Instruction reflects the Base the
+// prompt was rebuilt from.
+func TestRebuildWithPartsUpdatesInstruction(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+	cwd := t.TempDir()
+
+	parts := InstructionParts{
+		Base:   "STALE BASE",
+		Rules:  rulesSectionMarker + "stale rules",
+		Skills: skillsSectionMarker + "- /st: A skill.\n",
+	}
+	llm := &capturingLLM{name: "m", response: "ok"}
+	a, err := New(Config{
+		Model:            llm,
+		Instruction:      parts.Base,
+		InstructionParts: &parts,
+		WorkingDir:       cwd,
+	})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	next := InstructionParts{
+		Base:   "FRESH BASE",
+		Rules:  rulesSectionMarker + "fresh rules",
+		Skills: skillsSectionMarker + "- /fr: A skill.\n",
+	}
+	if err := a.RebuildWithParts(next); err != nil {
+		t.Fatalf("RebuildWithParts() error: %v", err)
+	}
+	if err := runForPrompt(t, a, llm); err != nil {
+		t.Fatal(err)
+	}
+	got := llm.capturedSystemInstruction()
+	if !strings.Contains(got, "FRESH BASE") {
+		t.Errorf("rebuilt prompt must carry the new supplied Base, got %q", got)
+	}
+	if strings.Contains(got, "STALE BASE") {
+		t.Errorf("rebuilt prompt must not carry the replaced Base, got %q", got)
+	}
+	if a.config.Instruction != "FRESH BASE" {
+		t.Errorf("cfg.Instruction = %q, want the new Base %q", a.config.Instruction, "FRESH BASE")
 	}
 }
 
