@@ -328,7 +328,8 @@ func TestCompareWithStore_Reuse(t *testing.T) {
 		"variant": buildArm(armSpec{name: "variant", steps: 8, calls: map[string]int{"read": 6}}),
 	}}
 
-	res1, reused1, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 5, dir)
+	runs := []RunResult{{Scenario: "grep-basics", Status: "pass"}}
+	res1, reused1, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), withArmRuns(runner, runs), 1, dir)
 	if err != nil {
 		t.Fatalf("first compareWithStore: %v", err)
 	}
@@ -339,9 +340,9 @@ func TestCompareWithStore_Reuse(t *testing.T) {
 		t.Fatalf("first run: runner called %d time(s), want 2", got)
 	}
 
-	// The store now holds the comparison; a second call must not reach the
-	// runner.
-	res2, reused2, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 5, dir)
+	// The store now holds the comparison; a second call for the same run
+	// count must not reach the runner.
+	res2, reused2, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), withArmRuns(runner, runs), 1, dir)
 	if err != nil {
 		t.Fatalf("second compareWithStore: %v", err)
 	}
@@ -364,16 +365,116 @@ func TestCompareWithStore_Reuse(t *testing.T) {
 
 	// A different pair must not be served from the first pair's file.
 	other := Variant{Name: "other", Parts: &agent.InstructionParts{Base: "other base"}}
-	runner2 := &fakeRunner{arms: map[string]ArmResult{
+	runner2 := withArmRuns(&fakeRunner{arms: map[string]ArmResult{
 		"control": buildArm(armSpec{name: "control", steps: 1}),
 		"other":   buildArm(armSpec{name: "other", steps: 2}),
-	}}
-	_, reusedOther, err := compareWithStore(context.Background(), controlVariant(), other, runner2, 5, dir)
+	}}, runs)
+	_, reusedOther, err := compareWithStore(context.Background(), controlVariant(), other, runner2, 1, dir)
 	if err != nil {
 		t.Fatalf("other-pair compareWithStore: %v", err)
 	}
 	if reusedOther {
 		t.Error("a different fingerprint pair must not reuse another pair's stored run")
+	}
+}
+
+// withArmRuns gives every scripted arm the given run list, so a stored
+// result carries the run count the reuse gate (issue 80) checks against the
+// request.
+func withArmRuns(f *fakeRunner, runs []RunResult) *fakeRunner {
+	for name, arm := range f.arms {
+		arm.Runs = runs
+		arm.Delivered = countDelivered(runs)
+		f.arms[name] = arm
+	}
+	return f
+}
+
+// TestCompareWithStore_ReuseHonorsRuns pins the run-count half of the reuse
+// gate (issue 80): the store file pins the variants' configuration, not how
+// many runs it holds, so a stored comparison with fewer runs than requested
+// must be re-executed — with the reason printed — and only an adequately
+// stocked result is reused.
+func TestCompareWithStore_ReuseHonorsRuns(t *testing.T) {
+	dir := t.TempDir()
+
+	oneRun := []RunResult{{Scenario: "live", Status: "pass"}}
+	arm := func(name string, runs []RunResult) ArmResult {
+		a := buildArm(armSpec{name: name, calls: map[string]int{"read": 1}})
+		a.Runs = runs
+		a.Delivered = countDelivered(runs)
+		return a
+	}
+
+	// A stored 1-run-per-arm result must not satisfy a 2-run request: the
+	// runner is called again and the fresh 2-run result is saved over it.
+	runner := &fakeRunner{arms: map[string]ArmResult{
+		"control": arm("control", oneRun),
+		"variant": arm("variant", oneRun),
+	}}
+	if _, reused, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 1, dir); err != nil {
+		t.Fatalf("seeding run: %v", err)
+	} else if reused {
+		t.Fatal("seeding run must not report reuse")
+	}
+
+	runner = &fakeRunner{arms: map[string]ArmResult{
+		"control": arm("control", []RunResult{oneRun[0], oneRun[0]}),
+		"variant": arm("variant", []RunResult{oneRun[0], oneRun[0]}),
+	}}
+	res, reused, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 2, dir)
+	if err != nil {
+		t.Fatalf("short-store compareWithStore: %v", err)
+	}
+	if reused {
+		t.Error("a 1-run stored result must not satisfy a 2-run request")
+	}
+	if got := len(runner.calls); got != 2 {
+		t.Errorf("short store: runner called %d time(s), want 2 (fresh execution)", got)
+	}
+	if len(res.Control.Runs) != 2 || len(res.Variant.Runs) != 2 {
+		t.Errorf("fresh result carries %d/%d runs, want 2/2", len(res.Control.Runs), len(res.Variant.Runs))
+	}
+	// The re-run overwrote the short store file, so the same request now reuses.
+	again, reused, err := compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 2, dir)
+	if err != nil {
+		t.Fatalf("re-request compareWithStore: %v", err)
+	}
+	if !reused {
+		t.Error("a 2-run stored result must be reused for a 2-run request")
+	}
+	if len(again.Control.Runs) != 2 || len(again.Variant.Runs) != 2 {
+		t.Errorf("reused result carries %d/%d runs, want 2/2", len(again.Control.Runs), len(again.Variant.Runs))
+	}
+
+	// More runs stored than requested is still reuse.
+	_, reused, err = compareWithStore(context.Background(), controlVariant(), variantVariant(), runner, 1, dir)
+	if err != nil {
+		t.Fatalf("fewer-runs compareWithStore: %v", err)
+	}
+	if !reused {
+		t.Error("a 2-run stored result must satisfy a 1-run request")
+	}
+}
+
+// TestAnonymize_DoesNotMutateContrasts pins the contrast deep copy: the
+// shallow struct copy shares the Contrasts backing array with the input, and
+// the direction rewrite must not leak into it.
+func TestAnonymize_DoesNotMutateContrasts(t *testing.T) {
+	runner := &fakeRunner{arms: map[string]ArmResult{
+		"control": buildArm(armSpec{name: "control", steps: 10, calls: map[string]int{"read": 4}}),
+		"variant": buildArm(armSpec{name: "variant", steps: 8, calls: map[string]int{"read": 6}}),
+	}}
+	res := mustCompare(t, controlVariant(), variantVariant(), runner, 5)
+	before := make([]Contrast, len(res.Contrasts))
+	copy(before, res.Contrasts)
+
+	_ = Anonymize(res, 3)
+
+	for i, c := range res.Contrasts {
+		if c != before[i] {
+			t.Errorf("Anonymize mutated input contrast %d: %+v -> %+v", i, before[i], c)
+		}
 	}
 }
 

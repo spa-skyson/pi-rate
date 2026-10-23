@@ -351,9 +351,13 @@ const storeDirName = ".harness-compare"
 // instead of re-executed — the Runner is not called at all — and a fresh
 // comparison is saved back for the next invocation. The fingerprint pair is
 // computed up front (the same hashes Compare derives), so the reuse check
-// precedes any execution. The boolean reports the reuse; both it and the
-// file name go to stdout, since that is the signal a caller watches the
-// console for.
+// precedes any execution. A stored comparison is reused only when both arms
+// carry at least the requested number of runs: the fingerprint pins the
+// variants' configuration, not the run count, so a 1-run result must not be
+// served to a caller who asked for 5 (issue 80: the missing runs are
+// supposed to be counted, not skipped). The boolean reports the reuse; both
+// it and the file name go to stdout, since that is the signal a caller
+// watches the console for.
 func compareWithStore(ctx context.Context, control, variant Variant, r Runner, runs int, dir string) (CompareResult, bool, error) {
 	store := NewStore(dir)
 	fp := [2]string{Fingerprint(control), Fingerprint(variant)}
@@ -362,8 +366,12 @@ func compareWithStore(ctx context.Context, control, variant Variant, r Runner, r
 		if err != nil {
 			fmt.Printf("compare: stored run unusable (%v) — running fresh\n", err)
 		} else if ok {
-			fmt.Printf("reused %s.json\n", fp[0]+"-"+fp[1])
-			return cached, true, nil
+			if len(cached.Control.Runs) >= runs && len(cached.Variant.Runs) >= runs {
+				fmt.Printf("reused %s.json\n", fp[0]+"-"+fp[1])
+				return cached, true, nil
+			}
+			fmt.Printf("stored runs %d/%d < requested %d — running fresh\n",
+				len(cached.Control.Runs), len(cached.Variant.Runs), runs)
 		}
 	}
 	res, err := Compare(ctx, control, variant, r, runs)

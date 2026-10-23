@@ -18,6 +18,10 @@ import (
 // a different mapping to confirm the verdict does not track the name.
 func Anonymize(res CompareResult, seed int64) CompareResult {
 	out := res
+	// Contrasts is a slice: the shallow copy above shares the backing array
+	// with res, and the Direction rewrite below would leak into the caller's
+	// result. Copy it before mutating.
+	out.Contrasts = append([]Contrast(nil), res.Contrasts...)
 	// Order arms by fingerprint so the mapping depends on the comparison's
 	// identity, not on struct field order.
 	ctrl, varnt := res.Control.Variant, res.Variant.Variant

@@ -53,8 +53,15 @@ func (s *Store) Save(res CompareResult) error {
 		return fmt.Errorf("compare: store encode: %w", err)
 	}
 	path := s.path(res.Fingerprint)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("compare: store write %s: %w", path, err)
+	// Write-then-rename: a crash or a concurrent reader must never see a
+	// half-written store file, which would fail to parse on the next Load.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("compare: store write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("compare: store rename %s -> %s: %w", tmp, path, err)
 	}
 	return nil
 }
