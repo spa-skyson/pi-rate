@@ -9,7 +9,7 @@ import (
 // TestPersonaAwareBudgetPassesAgentBuild: a subagent-child build carrying a
 // heavy persona (the test-engineer shape, 29.5K, issue #85) passes New()
 // when the persona size is announced, with the effective gate at
-// len(persona)+16_000 — a gate the persona + built-in tail fits but growth
+// len(persona)+24_000 — a gate the persona + built-in tail fits but growth
 // past it still fails. Without the announcement the same build must fail at
 // the plain 32K gate (the interactive behavior, unchanged).
 func TestPersonaAwareBudgetPassesAgentBuild(t *testing.T) {
@@ -28,8 +28,8 @@ func TestPersonaAwareBudgetPassesAgentBuild(t *testing.T) {
 
 	// With the announcement the child would make: New() passes.
 	budget := PersonaBudget(len(persona))
-	if budget != 29_480+16_000 {
-		t.Fatalf("PersonaBudget = %d, want len(persona)+16000 = %d", budget, 29_480+16_000)
+	if budget != 29_480+24_000 {
+		t.Fatalf("PersonaBudget = %d, want len(persona)+16000 = %d", budget, 29_480+24_000)
 	}
 	a, err := New(Config{Instruction: prompt, PersonaBudgetBytes: budget})
 	if err != nil {
@@ -86,12 +86,13 @@ func TestPersonaChildResolution(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode")
 	}
-	// The incident shape: persona 29_480 + built-in tail ≈ 43.5K. The plain
-	// gate rejected it; the resolved persona-aware gate must accept it.
+	// The incident shape: persona 29_480 + the working-directory tail
+	// (rules/skills/env ≈ 17.5K in this repository). The plain gate rejected
+	// it; the resolved persona-aware gate must accept it.
 	persona := 29_480
 	gate := effectiveInstructionBudget(PersonaBudget(persona))
-	if gate != 45_480 {
-		t.Fatalf("resolved gate = %d, want 45480", gate)
+	if gate != 53_480 {
+		t.Fatalf("resolved gate = %d, want 53480", gate)
 	}
 	prompt := strings.Repeat("x", persona) + "\nCurrent working directory: /tmp/p\n" + strings.Repeat("y", 14_000)
 	if len(prompt) > gate {

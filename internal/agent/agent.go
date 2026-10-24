@@ -1188,13 +1188,15 @@ const maxInstructionTotal = 32_000
 // personaPromptHeadroom is the slack a persona-aware whole-prompt budget
 // grants on top of the persona itself (issue #85): a subagent child's gate
 // resolves to len(persona)+headroom, which is guaranteed to cover the
-// persona plus the built-in tail it ships with (palace memory context, cwd
-// line, environment block) while everything that grows past it — Rules
-// picked up from the working directory, a longer tail — still fails the
-// build. Exported because the spawning parent (internal/cli) and the child
-// resolve the same number independently: the parent announces the size, the
-// child adds the headroom.
-const personaPromptHeadroom = 16_000
+// persona plus everything a child build adds around it — the built-in tail
+// (palace memory context, cwd line, environment block) and the Rules/Skills
+// the child's working directory contributes (a compacted repo AGENTS.md
+// measures ~17K in this repository; the measured worst case that shaped the
+// number is persona 30 072 + tail 16 751). Growth past the gate — a bigger
+// persona or fatter rules — still fails the build. Exported because the
+// spawning parent (internal/cli) and the child resolve the same number
+// independently: the parent announces the size, the child adds the headroom.
+const personaPromptHeadroom = 24_000
 
 // PersonaBudget resolves the whole-prompt gate for a child process running
 // on an agent persona of size personaBytes: personaBytes + headroom. It is
