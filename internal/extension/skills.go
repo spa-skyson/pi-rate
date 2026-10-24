@@ -20,7 +20,8 @@ import (
 type Skill struct {
 	// Name is the skill's identifier (derived from directory name).
 	Name string
-	// Description is a one-line description from frontmatter.
+	// Description is the description from frontmatter; may be a multi-line
+	// YAML folded (">") or literal ("|") scalar, joined into one value.
 	Description string
 	// Instruction is the markdown body (the system prompt to inject).
 	// Empty after LoadSkills/parseSkillFile; use LoadSkillBody to read it.
@@ -300,12 +301,18 @@ func parseSkillContent(content, skillName string) (Skill, string, error) {
 	frontmatterDone := false
 	var body strings.Builder
 
+	// Multi-line scalar state (YAML folded/literal block scalars). When a
+	// recognized key's value opens a block, collect the indented lines that
+	// follow into one value; an empty key means no block is open.
+	var block blockScalar
+
 	for scanner.Scan() {
 		line := scanner.Text()
 
 		// The first "---" opens the frontmatter and the second closes it for
 		// good; a later one is ordinary body text.
 		if !frontmatterDone && strings.TrimSpace(line) == "---" {
+			closeBlockScalar(&skill, &block)
 			inFrontmatter = !inFrontmatter
 			frontmatterDone = !inFrontmatter
 			continue
@@ -315,10 +322,142 @@ func parseSkillContent(content, skillName string) (Skill, string, error) {
 			body.WriteString("\n")
 			continue
 		}
+		if openBlockScalar(&skill, &block, line) {
+			continue
+		}
 		applyFrontmatterLine(&skill, line)
 	}
+	closeBlockScalar(&skill, &block)
 
 	return skill, strings.TrimSpace(body.String()), scanner.Err()
+}
+
+// openBlockScalar either appends line to the currently open multi-line scalar
+// (returning true) or starts a new one when line opens one (also returning
+// true); it returns false when line is an ordinary frontmatter line and any
+// open block must be closed first. A continuation line is an empty line or
+// one starting with a space or tab; anything non-indented ends the block.
+func openBlockScalar(skill *Skill, block *blockScalar, line string) bool {
+	if block.key == "" {
+		return startBlockScalar(block, line)
+	}
+	if line == "" || line[0] == ' ' || line[0] == '\t' {
+		block.lines = append(block.lines, strings.TrimSpace(line))
+		return true
+	}
+	closeBlockScalar(skill, block)
+	return false
+}
+
+// startBlockScalar recognizes a "key: >" / "key: |" value (with optional
+// -/+ modifiers) and a bare "key:" with no value on the same line — the
+// latter is folded by default, matching folded-scalar semantics so
+// multi-line descriptions written without the ">" marker still parse. Only
+// recognized keys (name, description, tools) open a block; anything else is
+// ordinary frontmatter and returns false. A non-empty value on the same
+// line (e.g. "description: text") is not a block.
+func startBlockScalar(block *blockScalar, line string) bool {
+	key, value, ok := parseFrontmatterLine(line)
+	if !ok || !isRecognizedSkillKey(key) {
+		return false
+	}
+	switch value {
+	case ">":
+		*block = blockScalar{key: key, folded: true}
+		return true
+	case "|":
+		*block = blockScalar{key: key}
+		return true
+	case ">-":
+		*block = blockScalar{key: key, folded: true, strip: true}
+		return true
+	case "|-":
+		*block = blockScalar{key: key, strip: true}
+		return true
+	case ">+":
+		*block = blockScalar{key: key, folded: true}
+		return true
+	case "|+":
+		*block = blockScalar{key: key}
+		return true
+	case "":
+		*block = blockScalar{key: key, folded: true}
+		return true
+	}
+	return false
+}
+
+// closeBlockScalar folds the open block into its key's value and clears the
+// block state. Folded scalars (">") join the collected lines with single
+// spaces (an empty line becomes a newline, the simplified folding issue 86
+// settled on); literal scalars ("|") keep newlines. Without a strip modifier
+// the value keeps a single trailing newline (YAML clip); with one (">-", "|-")
+// it ends without one. Edge whitespace is trimmed either way.
+func closeBlockScalar(skill *Skill, block *blockScalar) {
+	if block.key == "" {
+		return
+	}
+	key, folded, strip, lines := block.key, block.folded, block.strip, block.lines
+	*block = blockScalar{}
+	if len(lines) == 0 {
+		// An opened-but-empty block ("name:" with nothing indented under
+		// it) still records the empty value: the pre-scalar parser applied
+		// the empty line, and a default must not survive it.
+		applyFrontmatterValue(skill, key, "")
+		return
+	}
+	var value string
+	if folded {
+		value = foldBlockLines(lines)
+	} else {
+		value = strings.Join(lines, "\n")
+	}
+	if !strip {
+		value += "\n"
+	}
+	applyFrontmatterValue(skill, key, strings.Trim(value, " \t"))
+}
+
+// foldBlockLines joins folded-scalar lines: consecutive non-empty lines are
+// separated by one space, each empty line becomes a newline. Leading and
+// trailing empty lines are dropped (the result is TrimSpace'd anyway).
+func foldBlockLines(lines []string) string {
+	var b strings.Builder
+	prevEmpty := false
+	for _, l := range lines {
+		switch {
+		case l == "":
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			prevEmpty = true
+		case b.Len() == 0:
+			b.WriteString(l)
+			prevEmpty = false
+		case prevEmpty:
+			b.WriteString(l)
+			prevEmpty = false
+		default:
+			b.WriteString(" ")
+			b.WriteString(l)
+		}
+	}
+	return b.String()
+}
+
+// blockScalar holds the in-progress multi-line scalar state while
+// parseSkillContent walks the frontmatter.
+type blockScalar struct {
+	key    string
+	folded bool
+	strip  bool
+	lines  []string
+}
+
+// isRecognizedSkillKey reports whether key is one the SKILL.md format
+// defines; only these may open a multi-line scalar.
+func isRecognizedSkillKey(key string) bool {
+	return key == "name" || key == "description" || key == "tools"
 }
 
 // applyFrontmatterLine records one recognized "key: value" frontmatter line on
@@ -328,6 +467,11 @@ func applyFrontmatterLine(skill *Skill, line string) {
 	if !ok {
 		return
 	}
+	applyFrontmatterValue(skill, key, value)
+}
+
+// applyFrontmatterValue stores a parsed frontmatter key/value pair on skill.
+func applyFrontmatterValue(skill *Skill, key, value string) {
 	switch key {
 	case "name":
 		skill.Name = value
