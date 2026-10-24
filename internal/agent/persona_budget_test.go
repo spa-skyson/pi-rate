@@ -38,7 +38,7 @@ func TestPersonaAwareBudgetPassesAgentBuild(t *testing.T) {
 	_ = a
 
 	// The headroom is real slack, not a new unlimited mode: a prompt past
-	// persona+16000 fails naming the numbers.
+	// persona+24000 fails naming the numbers.
 	overBudget := PersonaBudget(len(persona))
 	over := strings.Repeat("x", overBudget+1)
 	if _, err := New(Config{Instruction: over, PersonaBudgetBytes: budget}); err == nil {
@@ -67,7 +67,7 @@ func TestPersonaBudgetNeverWeakensPlainGate(t *testing.T) {
 		{in: 0, want: maxInstructionTotal},
 		{in: maxInstructionTotal, want: maxInstructionTotal},
 		{in: maxInstructionTotal + 1, want: maxInstructionTotal + 1},
-		{in: 45_480, want: 45_480},
+		{in: 53_480, want: 53_480},
 	} {
 		if got := effectiveInstructionBudget(tc.in); got != tc.want {
 			t.Errorf("effectiveInstructionBudget(%d) = %d, want %d", tc.in, got, tc.want)
@@ -78,7 +78,7 @@ func TestPersonaBudgetNeverWeakensPlainGate(t *testing.T) {
 // TestPersonaChildResolution pins the child-side arithmetic the spawned
 // process performs: the orchestrator announces the persona size via
 // PI_AGENT_PERSONA_BYTES, and the child resolves its whole-prompt gate to
-// PersonaBudget(size) = size+16_000. The full command-line path is covered
+// PersonaBudget(size) = size+24_000. The full command-line path is covered
 // by the cli package wiring (buildNonInteractiveInstruction → agent.New)
 // — driving a real child binary here would wait on a model, which is not
 // what this test is about.
@@ -114,8 +114,8 @@ func TestPersonaChildResolution(t *testing.T) {
 // check above pins its placement in Config).
 func TestPersonaBudgetFieldRoundTrips(t *testing.T) {
 	var cfg Config
-	cfg.PersonaBudgetBytes = 45_480
-	if cfg.PersonaBudgetBytes != 45_480 {
-		t.Errorf("PersonaBudgetBytes = %d, want 45480", cfg.PersonaBudgetBytes)
+	cfg.PersonaBudgetBytes = 53_480
+	if cfg.PersonaBudgetBytes != 53_480 {
+		t.Errorf("PersonaBudgetBytes = %d, want 53480", cfg.PersonaBudgetBytes)
 	}
 }

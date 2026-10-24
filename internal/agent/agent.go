@@ -386,7 +386,7 @@ type Config struct {
 	// It is set for a subagent child process assembled from an agent persona:
 	// the orchestrator spawns the child with the persona as its entire system
 	// instruction (--system, size announced via PI_AGENT_PERSONA_BYTES), and
-	// the child passes len(persona)+16_000 here. A persona is a short-lived,
+	// the child passes len(persona)+24_000 here. A persona is a short-lived,
 	// single-task process, so its contribution to the context window is paid
 	// for differently than an always-on interactive agent's — it is bounded by
 	// the subagent package's maxAgentPersonaBytes file gate instead of the

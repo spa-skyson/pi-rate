@@ -18,12 +18,12 @@ func TestPersonaBudgetFromEnv(t *testing.T) {
 	if !ok {
 		t.Fatal("the env var must resolve when set")
 	}
-	if got := agent.PersonaBudget(personaBytes); got != 45_480 {
-		t.Errorf("PersonaBudget(29480) = %d, want 45480 (len(persona)+16000)", got)
+	if got := agent.PersonaBudget(personaBytes); got != 53_480 {
+		t.Errorf("PersonaBudget(29480) = %d, want 53480 (len(persona)+24000)", got)
 	}
 	cfg := agent.Config{PersonaBudgetBytes: agent.PersonaBudget(personaBytes)}
-	if cfg.PersonaBudgetBytes != 45_480 {
-		t.Errorf("Config.PersonaBudgetBytes = %d, want 45480", cfg.PersonaBudgetBytes)
+	if cfg.PersonaBudgetBytes != 53_480 {
+		t.Errorf("Config.PersonaBudgetBytes = %d, want 53480", cfg.PersonaBudgetBytes)
 	}
 
 	// The plain run: no announcement, zero budget, plain gate.
