@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spa-skyson/pi-rate/internal/config"
+	"github.com/spa-skyson/pi-rate/internal/notice"
 	"github.com/spa-skyson/pi-rate/internal/permission"
 )
 
@@ -18,6 +19,27 @@ import (
 // value. Below this the author almost certainly meant seconds; honoring it
 // would kill the agent before it could produce anything.
 const minAgentTimeoutMs = 1000
+
+// maxAgentPersonaBytes caps the size of one agent persona FILE (issue #85).
+// A subagent is a short-lived, single-task process: its persona rides the
+// child's system prompt whole, so unlike the always-on interactive prompt it
+// is not subject to the 32K whole-prompt gate (a persona-aware limit covers
+// the file at spawn time, see agent.Config.PersonaBudgetBytes) — but it must
+// have a limit of its own. 48_000 bytes leaves room for the shipped heavy
+// personas — test-engineer (29.5K) and pm (24.1K) — to pass with headroom,
+// while catching a persona that has quietly grown into a prompt-sized
+// document. The check is on the raw FILE size (frontmatter included), because
+// that is the byte count an author sees and the number the child budget
+// derives from. A file over the limit fails agent discovery loudly at
+// startup — not at first spawn, where the failure would surface as a broken
+// subagent run; a file within maxAgentPersonaBytes-maxAgentPersonaWarnGap of
+// the limit loads but raises a notice.
+const maxAgentPersonaBytes = 48_000
+
+// maxAgentPersonaWarnGap is how close to maxAgentPersonaBytes a persona file
+// may sit before loading it warns: the last 4KiB are the "you are about to
+// hit the cap" band.
+const maxAgentPersonaWarnGap = 4_096
 
 // AgentScope defines the scope for agent discovery.
 type AgentScope string
@@ -182,7 +204,16 @@ func ParseAgentFileFromFS(fsys fs.FS, path string) (AgentConfig, error) {
 }
 
 // parseAgentContent is the shared parsing logic for agent markdown content.
+// Both loaders funnel here, so the persona budget gate
+// (maxAgentPersonaBytes) covers bundled, user and project agents alike: a
+// file over the cap fails the load naming the path, its size and the limit;
+// a file in the last maxAgentPersonaWarnGap bytes below the cap loads and
+// raises a notice through the same sink the skill hygiene uses.
 func parseAgentContent(content, path string) (AgentConfig, error) {
+	if err := checkPersonaBudget(content, path); err != nil {
+		return AgentConfig{}, err
+	}
+
 	// Derive default name from filename: explore.md → explore
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 
@@ -236,6 +267,29 @@ func parseAgentContent(content, path string) (AgentConfig, error) {
 	cfg.Instruction = strings.TrimSpace(body.String())
 	cfg.Permission = perm.rules
 	return cfg, nil
+}
+
+// checkPersonaBudget enforces maxAgentPersonaBytes on one agent persona file
+// (issue #85). Over the cap is a load error naming the path, the size and
+// the limit — loud at startup, where an author fixes the file, rather than
+// at first spawn, where the failure would break a running session's
+// subagent call. Within maxAgentPersonaWarnGap of the cap it loads and
+// warns once through the notice sink, mirroring the skill-hygiene warn
+// path: the persona still works, the author learns it is close to the
+// budget. len(content) is the raw file size in bytes — what the child
+// persona budget derives from and what an author sees in ls.
+func checkPersonaBudget(content, path string) error {
+	size := len(content)
+	if size > maxAgentPersonaBytes {
+		return fmt.Errorf(
+			"persona file %s is %d bytes, over the %d byte agent persona budget; shrink the persona (move reference material into skills)",
+			path, size, maxAgentPersonaBytes)
+	}
+	if size > maxAgentPersonaBytes-maxAgentPersonaWarnGap {
+		notice.Notifyf("persona %s is %d bytes, close to the %d budget",
+			filepath.Base(path), size, maxAgentPersonaBytes)
+	}
+	return nil
 }
 
 // applyAgentFrontmatterKey sets the field of cfg named by a frontmatter key.

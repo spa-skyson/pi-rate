@@ -382,6 +382,23 @@ type Config struct {
 	// naming the sections.
 	InstructionParts *InstructionParts
 
+	// PersonaBudgetBytes raises the whole-prompt budget gate for this build.
+	// It is set for a subagent child process assembled from an agent persona:
+	// the orchestrator spawns the child with the persona as its entire system
+	// instruction (--system, size announced via PI_AGENT_PERSONA_BYTES), and
+	// the child passes len(persona)+24_000 here. A persona is a short-lived,
+	// single-task process, so its contribution to the context window is paid
+	// for differently than an always-on interactive agent's — it is bounded by
+	// the subagent package's maxAgentPersonaBytes file gate instead of the
+	// 32K whole-prompt budget, whose baseline exists for prompts that grow
+	// Rules/Skills on top of a fixed base. With this field set, the whole
+	// persona plus the built-in tail (palace context, cwd line) is guaranteed
+	// to pass, while anything that grows beyond persona+headroom still fails
+	// the build. Zero (the default) keeps the plain 32K gate; a value at or
+	// below maxInstructionTotal is ignored, so the gate is never weakened
+	// below the always-on budget.
+	PersonaBudgetBytes int
+
 	// SessionService overrides the default in-memory session service.
 	// If nil, an in-memory service is created.
 	SessionService session.Service
@@ -561,7 +578,7 @@ func resolveInjectedPrompt(cfg Config) *string {
 }
 
 func buildRunner(cfg Config, instruction string, sessionSvc session.Service) (*runner.Runner, error) {
-	if err := checkInstructionTotal(instruction, cfg.InstructionParts); err != nil {
+	if err := checkInstructionTotalBudget(instruction, cfg.InstructionParts, effectiveInstructionBudget(cfg.PersonaBudgetBytes)); err != nil {
 		return nil, err
 	}
 	name := cfg.Name
@@ -1168,14 +1185,47 @@ func (p InstructionParts) String() string {
 // always-on backstop for the sum.
 const maxInstructionTotal = 32_000
 
-// checkInstructionTotal enforces maxInstructionTotal on the fully assembled
-// prompt, in bytes. Every section that is itself over the limit is named with
-// its size — a caller fixing the prompt needs all offenders, not just the
-// first. The prompt is passed pre-assembled so the check can never drift from
-// what the model actually receives; parts carries the section sizes when the
+// personaPromptHeadroom is the slack a persona-aware whole-prompt budget
+// grants on top of the persona itself (issue #85): a subagent child's gate
+// resolves to len(persona)+headroom, which is guaranteed to cover the
+// persona plus everything a child build adds around it — the built-in tail
+// (palace memory context, cwd line, environment block) and the Rules/Skills
+// the child's working directory contributes (a compacted repo AGENTS.md
+// measures ~17K in this repository; the measured worst case that shaped the
+// number is persona 30 072 + tail 16 751). Growth past the gate — a bigger
+// persona or fatter rules — still fails the build. Exported because the
+// spawning parent (internal/cli) and the child resolve the same number
+// independently: the parent announces the size, the child adds the headroom.
+const personaPromptHeadroom = 24_000
+
+// PersonaBudget resolves the whole-prompt gate for a child process running
+// on an agent persona of size personaBytes: personaBytes + headroom. It is
+// the single definition of that arithmetic — the internal
+// effectiveInstructionBudget raises the gate to whatever this returns, and
+// never below maxInstructionTotal.
+func PersonaBudget(personaBytes int) int {
+	return personaBytes + personaPromptHeadroom
+}
+
+// effectiveInstructionBudget resolves the whole-prompt budget for a build:
+// a persona-aware limit only ever raises the gate (and only past the
+// always-on budget — a value at or below maxInstructionTotal keeps the
+// default), so this knob can never weaken the interactive 32K guarantee.
+func effectiveInstructionBudget(personaBudget int) int {
+	if personaBudget > maxInstructionTotal {
+		return personaBudget
+	}
+	return maxInstructionTotal
+}
+
+// checkInstructionTotalBudget enforces budget on the fully assembled prompt,
+// in bytes. Every section that is itself over the limit is named with its
+// size — a caller fixing the prompt needs all offenders, not just the first.
+// The prompt is passed pre-assembled so the check can never drift from what
+// the model actually receives; parts carries the section sizes when the
 // caller assembled the prompt from InstructionParts, and may be nil.
-func checkInstructionTotal(prompt string, parts *InstructionParts) error {
-	if len(prompt) <= maxInstructionTotal {
+func checkInstructionTotalBudget(prompt string, parts *InstructionParts, budget int) error {
+	if len(prompt) <= budget {
 		return nil
 	}
 	known := parts
@@ -1193,10 +1243,10 @@ func checkInstructionTotal(prompt string, parts *InstructionParts) error {
 		{"Skills", len(known.Skills)},
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "system instruction is %d bytes, over the %d byte budget:", len(prompt), maxInstructionTotal)
+	fmt.Fprintf(&b, "system instruction is %d bytes, over the %d byte budget:", len(prompt), budget)
 	none := true
 	for _, s := range sections {
-		if s.size > maxInstructionTotal {
+		if s.size > budget {
 			fmt.Fprintf(&b, " %s=%d", s.name, s.size)
 			none = false
 		}
@@ -1205,6 +1255,13 @@ func checkInstructionTotal(prompt string, parts *InstructionParts) error {
 		b.WriteString(" no single section exceeds the budget; the total is spread across Base+Rules+Skills+Env")
 	}
 	return fmt.Errorf("%s", b.String())
+}
+
+// checkInstructionTotal enforces maxInstructionTotal on the fully assembled
+// prompt — the plain always-on gate, kept for callers without a persona
+// budget.
+func checkInstructionTotal(prompt string, parts *InstructionParts) error {
+	return checkInstructionTotalBudget(prompt, parts, maxInstructionTotal)
 }
 
 // Section markers the assembler writes into the prompt. They double as the

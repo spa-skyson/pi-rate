@@ -399,6 +399,19 @@ func mcpEnv(agent AgentConfig) []string {
 	return []string{config.EnvMCP + "=" + strings.Join(agent.MCP, ",")}
 }
 
+// personaEnv renders the persona budget the child applies to its own
+// whole-prompt gate: the instruction this spawn passes as --system IS the
+// agent's persona, and the child — a process that never sees the agent file
+// — must know its size to resolve the persona-aware limit
+// (agent.Config.PersonaBudgetBytes, issue #85). An agent without an
+// instruction renders nothing: the child keeps the plain 32K gate.
+func personaEnv(agent AgentConfig) []string {
+	if agent.Instruction == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s=%d", config.EnvPersonaBytes, len(agent.Instruction))}
+}
+
 // streamStart is the synchronous handshake of SpawnWithInputFallback: the
 // first attempt that produced a live event stream, or the failure when no
 // attempt ever did.
@@ -903,6 +916,14 @@ func (o *Orchestrator) Spawn(ctx context.Context, input SpawnInput) (<-chan Even
 	// is a one-shot json run and lifts no MCP server by default; the agent's
 	// frontmatter `mcp:` names the ones it instructs the model to use.
 	spawnOpts.Env = append(spawnOpts.Env, mcpEnv(agent)...)
+
+	// The child's whole-prompt budget: the persona rides --system, and its
+	// size rides the environment (config.EnvPersonaBytes) — the child is a
+	// separate process that never sees the agent file, and its 32K whole-prompt
+	// gate would reject a persona the file gate deliberately allows (issue
+	// #85). Unset when the spawn carries no persona instruction, so a plain
+	// child keeps the plain gate.
+	spawnOpts.Env = append(spawnOpts.Env, personaEnv(agent)...)
 
 	proc, err := o.dispatchSpawn(ctx, spawnOpts, agent.Name)
 	if err != nil {
