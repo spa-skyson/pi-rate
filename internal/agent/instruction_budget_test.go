@@ -224,6 +224,9 @@ func TestSkillTriggerHygiene(t *testing.T) {
 		{Name: "memory-palace", Description: "Используй, когда задача нетривиальная."},
 		// Old markers keep matching after the extension.
 		{Name: "when-to-use", Description: "When to use: large refactors."},
+		// A folded-scalar description as the parser now assembles it
+		// (issue 86): the marker lands on a joined line, not a bare ">".
+		{Name: "glab-folded", Description: "GitLab CLI for working with GitLab. Use this skill whenever you run any `glab` command or GitLab API call.\n"},
 	}
 	// A descriptive one-liner with no activation condition still warns.
 	lazy := extension.Skill{Name: "lazy-skill", Description: "Forces the laziest solution that actually works"}
