@@ -962,6 +962,16 @@ func runNonInteractive(
 
 	instruction := buildNonInteractiveInstruction(palaceContext)
 
+	// A spawned child (a subagent persona) learns its persona's size from the
+	// environment the orchestrator set and raises its whole-prompt gate
+	// accordingly (issue #85): the persona rides --system whole, so the
+	// always-on 32K budget is not the one it answers to. Every other
+	// non-interactive run keeps the plain gate.
+	var personaBudget int
+	if personaBytes, ok := config.ResolvePersonaBytes(); ok {
+		personaBudget = agent.PersonaBudget(personaBytes)
+	}
+
 	hooks := convertHooks(cfg.Hooks)
 	beforeCBs := extension.BuildBeforeToolCallbacks(hooks)
 
@@ -1080,6 +1090,7 @@ func runNonInteractive(
 		Tools:                coreTools,
 		Toolsets:             allToolsets,
 		Instruction:          instruction,
+		PersonaBudgetBytes:   personaBudget,
 		SessionService:       sessionSvc,
 		Version:              versionString(),
 		BeforeToolCallbacks:  beforeCBs,

@@ -35,6 +35,16 @@ const EnvStreamIdleTimeoutMS = "PI_STREAM_IDLE_TIMEOUT_MS"
 // agent's frontmatter `mcp:` to the child process (issue #68).
 const EnvMCP = "PI_MCP"
 
+// EnvPersonaBytes carries the size of the persona a subagent parent passed
+// to its child as --system. The child reads it to raise its whole-prompt
+// budget gate to len(persona)+16_000 (see agent.Config.PersonaBudgetBytes):
+// a subagent persona is bounded by its own file gate
+// (maxAgentPersonaBytes), not by the interactive 32K budget, and the child
+// — a separate process that never sees the agent file — must learn the
+// persona size from somewhere. Unset or unparsable means "no persona": the
+// plain 32K gate applies.
+const EnvPersonaBytes = "PI_AGENT_PERSONA_BYTES"
+
 // DefaultMidTurnAttempts is the total number of times a turn may run when a
 // transient failure cuts it short mid-reply: the first attempt plus two
 // replays, the behavior #41 shipped with.
