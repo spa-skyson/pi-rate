@@ -28,11 +28,19 @@ func openaiCaptureServer(t *testing.T, body *map[string]any) *httptest.Server {
 		_ = json.Unmarshal(raw, body)
 
 		w.Header().Set("Content-Type", "application/json")
+		// The reply carries both wire shapes: the Responses fields are ignored
+		// by the completions decoder and vice versa, so one endpoint serves
+		// every OpenAI-family capture test.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":     "resp_ws",
 			"object": "response",
 			"status": "completed",
 			"model":  "gpt-6-astra",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "A positive story."},
+				"finish_reason": "stop",
+			}},
 			"output": []map[string]any{{
 				"type":   "message",
 				"id":     "msg_ws",

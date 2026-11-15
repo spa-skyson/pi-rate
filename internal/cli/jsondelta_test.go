@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 
 	"github.com/spa-skyson/pi-rate/internal/agent"
@@ -389,5 +390,51 @@ func TestJSONGroupingStreamedChunksBySentence(t *testing.T) {
 	if len(events) != 3 {
 		t.Errorf("got %d events, want 3 (one per sentence) from %d chunks: %q",
 			len(events), len(llm.chunks), buf.String())
+	}
+}
+
+// A turn's reasoning must reach --mode json once: the live thinking-role
+// partials emit as thinking_delta, and the aggregate's Thought part — the
+// persisted copy of the same text — is suppressed. A think-then-call turn has
+// no reply-text deltas, so only a thinking-aware dedup sees this duplicate.
+func TestJSONPartsDropsAggregateThinkingReSend(t *testing.T) {
+	thinkingPartial := func(text string) *session.Event {
+		ev := &session.Event{Author: "assistant"}
+		ev.Content = &genai.Content{Role: "thinking", Parts: []*genai.Part{{Text: text}}}
+		ev.Partial = true
+		return ev
+	}
+	aggregate := &session.Event{Author: "assistant"}
+	aggregate.Content = &genai.Content{
+		Role: genai.RoleModel,
+		Parts: []*genai.Part{
+			{Text: "hmm deep", Thought: true},
+			{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "bash", Args: map[string]any{"cmd": "ls"}}},
+		},
+	}
+
+	var buf bytes.Buffer
+	em := newJSONEmitter(json.NewEncoder(&buf), nil, true)
+	var dedup agent.StreamDedup
+	for _, ev := range []*session.Event{thinkingPartial("hmm "), thinkingPartial("deep"), aggregate} {
+		dedup.BeginEvent(ev)
+		em.parts(ev, &dedup)
+	}
+	em.flush()
+
+	var thinking []string
+	for _, e := range jsonEvents(t, &buf) {
+		if e.Type == "thinking_delta" {
+			thinking = append(thinking, e.Delta)
+		}
+	}
+	want := []string{"hmm ", "deep"}
+	if len(thinking) != len(want) {
+		t.Fatalf("thinking_delta deltas = %q, want the live deltas %q (the aggregate re-send must be dropped)", thinking, want)
+	}
+	for i := range want {
+		if thinking[i] != want[i] {
+			t.Errorf("thinking_delta[%d] = %q, want %q", i, thinking[i], want[i])
+		}
 	}
 }

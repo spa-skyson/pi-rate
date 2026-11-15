@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -59,6 +60,11 @@ type openaiModel struct {
 	// off the wire entirely so the provider default stands. Applied on both
 	// the Chat Completions and Responses paths (see the two request builders).
 	temperature *float64
+	// kimiCoding is true when the base URL points at the kimi coding-plan
+	// endpoint, which rejects every sampling temperature but its own with a
+	// 400 — see kimiCodingOmitsTemperature. The temperature field stays off
+	// the wire on both request paths when set.
+	kimiCoding bool
 	// mu protects responseState for Responses mode multi-turn.
 	mu            sync.Mutex
 	responseState *responsesState // nil when using Chat Completions
@@ -158,6 +164,7 @@ func NewOpenAI(_ context.Context, modelName, apiKey, baseURL string, llmOpts *LL
 		enableWebSearch:    openaiWebSearchEnabled(llmOpts != nil && llmOpts.EnableOpenAIWebSearch),
 		thinkingLevel:      openaiThinkingLevel(modelName, llmOpts),
 		temperature:        openaiTemperature(llmOpts),
+		kimiCoding:         kimiCodingOmitsTemperature(baseURL),
 		responseState:      nil, // determined per-call based on model
 	}, nil
 }
@@ -193,6 +200,30 @@ func openaiTemperature(llmOpts *LLMOptions) *float64 {
 		return nil
 	}
 	return llmOpts.Temperature
+}
+
+// kimiCodingOmitsTemperature reports whether baseURL points at the kimi
+// coding-plan endpoint, which accepts no sampling temperature but its own:
+// any other value — 0.3, 0.7, whatever an agent's frontmatter carries — is
+// rejected with `400 {"error":{"message":"invalid temperature: only 1 is
+// allowed for this model"}}` before the model even runs, while omitting the
+// field and sending 1 both pass. Omitting is the resilient choice: the server
+// keeps applying its only legal value even if it relaxes the check later.
+//
+// Matched on the host (api.kimi.ai, port-insensitive) plus a /coding path
+// segment — either the whole path or a deeper one — so the plan's own base
+// (…/coding/v1, …/coding, and any deeper revision) matches while the ordinary
+// api.kimi.ai/v1 API — which takes a normal temperature — does not. The
+// segment form matters because the OpenAI-compat config path passes the base
+// URL through unresolved, so "…/coding" can arrive without its /v1 tail.
+func kimiCodingOmitsTemperature(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	p := strings.ToLower(u.Path)
+	return strings.EqualFold(u.Hostname(), "api.kimi.ai") &&
+		(p == "/coding" || strings.Contains(p, "/coding/"))
 }
 
 func (m *openaiModel) Name() string { return m.modelName }

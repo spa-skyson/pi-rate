@@ -1559,7 +1559,7 @@ func (m *model) emitEventPart(
 	part *genai.Part,
 ) error {
 	if part.Text != "" {
-		skipped, err := m.emitPartText(ch, ev, dedup, detector, log, part.Text)
+		skipped, err := m.emitPartText(ch, ev, dedup, detector, log, part.Text, part.Thought)
 		if err != nil {
 			return err
 		}
@@ -1590,6 +1590,9 @@ func (m *model) emitEventPart(
 // emitPartText forwards one part's text, as thinking or as reply text. It
 // reports whether the text was the deduplicated aggregate re-send, in which
 // case the caller must skip the rest of the part rather than emit it twice.
+// thought marks a Thought-flagged part: reasoning riding the final aggregate,
+// which reads as thought — never as the turn's reply — and which SkipThinking
+// suppresses when the same reasoning already streamed as live deltas.
 func (m *model) emitPartText(
 	ch chan agentMsg,
 	ev *session.Event,
@@ -1597,8 +1600,12 @@ func (m *model) emitPartText(
 	detector *stuckDetector,
 	log *logger.Logger,
 	text string,
+	thought bool,
 ) (skipped bool, err error) {
-	if ev.Content.Role == "thinking" {
+	if ev.Content.Role == "thinking" || thought {
+		if dedup.SkipThinking(ev) {
+			return true, nil // aggregate re-send; the deltas already went out
+		}
 		log.Thinking(ev.Author, text)
 		ch <- agentThinkingMsg{text: text}
 		return false, stuckErr(detector.observeOutput(text))

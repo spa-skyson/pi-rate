@@ -2200,9 +2200,17 @@ func printGroundingEvent(ev *session.Event, providerName string, groundedSeen ma
 // tool activity to stderr. The caller must have called dedup.BeginEvent for ev.
 func printEventParts(ev *session.Event, dedup *agent.StreamDedup, log *logger.Logger) {
 	for _, part := range ev.Content.Parts {
-		if part.Text != "" && ev.Content.Role == "thinking" {
-			fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m", part.Text)
-			log.Thinking(ev.Author, part.Text)
+		if part.Text != "" && (ev.Content.Role == "thinking" || part.Thought) {
+			// Reasoning: streaming-role partials and Thought-flagged parts of
+			// the final aggregate both print dimmed. The aggregate re-send of
+			// reasoning already streamed as deltas is suppressed the same way
+			// reply text is, so a turn does not print its thinking twice;
+			// SkipThinking also records the live deltas, which plain SkipText
+			// never saw.
+			if !dedup.SkipThinking(ev) {
+				fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m", part.Text)
+				log.Thinking(ev.Author, part.Text)
+			}
 			continue
 		}
 		if part.Text != "" {

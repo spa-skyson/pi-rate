@@ -40,13 +40,16 @@ func EventError(ev *session.Event) error {
 // any other role (a user turn, a tool result) belongs to a new turn.
 var modelRoles = map[string]bool{"model": true, "thinking": true}
 
-// StreamDedup suppresses the duplicate copy of assistant text that SSE
-// streaming produces.
+// StreamDedup suppresses the duplicate copies of assistant text and reasoning
+// that SSE streaming produces.
 //
 // Under StreamingModeSSE, ADK yields each chunk as a Partial event and then
 // re-yields the whole turn once more as a non-partial aggregate. A consumer
 // that emits every text part it sees therefore emits the reply twice — which
-// is what `pi --mode print` and `--mode json` did until this existed.
+// is what `pi --mode print` and `--mode json` did until this existed. The same
+// shape now applies to reasoning: providers stream thinking deltas live and
+// then persist the same text on the aggregate as a Thought part, so a consumer
+// that emits both would double every thought.
 //
 // Usage, once per run:
 //
@@ -63,7 +66,10 @@ var modelRoles = map[string]bool{"model": true, "thinking": true}
 //
 // The zero value is ready to use. Not safe for concurrent use; one value
 // tracks one event stream.
-type StreamDedup struct{ streamed bool }
+type StreamDedup struct {
+	streamed bool // reply-text deltas were seen this turn
+	thought  bool // reasoning deltas were seen this turn
+}
 
 // BeginEvent starts a new turn's bookkeeping when ev is not model-authored.
 // A user or tool-result event means the next model turn may arrive as a bare
@@ -75,6 +81,7 @@ func (d *StreamDedup) BeginEvent(ev *session.Event) {
 	}
 	if !modelRoles[ev.Content.Role] {
 		d.streamed = false
+		d.thought = false
 	}
 }
 
@@ -92,4 +99,23 @@ func (d *StreamDedup) SkipText(ev *session.Event) bool {
 		return false
 	}
 	return d.streamed
+}
+
+// SkipThinking is SkipText's counterpart for reasoning: it reports whether the
+// thinking text part currently being walked is the aggregate re-send of
+// reasoning already emitted as thinking deltas. Call it for every thinking
+// part with non-empty text — streaming-role partials and Thought-flagged parts
+// of the aggregate alike — because it is what records that deltas were seen.
+// A bare aggregate (a non-streaming provider, where no deltas ran ahead of it)
+// still passes through, so the reasoning reaches surfaces that never saw it
+// live.
+func (d *StreamDedup) SkipThinking(ev *session.Event) bool {
+	if ev == nil {
+		return false
+	}
+	if ev.Partial {
+		d.thought = true
+		return false
+	}
+	return d.thought
 }
