@@ -122,6 +122,127 @@ func TestStreamDedup_NilSafe(t *testing.T) {
 	if d.SkipText(nil) {
 		t.Error("SkipText(nil) = true, want false")
 	}
+	if d.SkipThinking(nil) {
+		t.Error("SkipThinking(nil) = true, want false")
+	}
+}
+
+// thoughtEvent builds the shape a thought-bearing turn arrives in: a
+// streaming-role partial and a Thought-flagged part on the aggregate.
+func thoughtEvent(role, text string, partial bool) *session.Event {
+	ev := textEvent(role, text, partial)
+	if !partial {
+		ev.LLMResponse.Content.Parts[0].Thought = true
+	}
+	return ev
+}
+
+// feedThinking runs a sequence of events through a StreamDedup the way the
+// thinking emitters do — routing reasoning to SkipThinking, everything else to
+// SkipText — and returns the surviving thinking texts.
+func feedThinking(d *StreamDedup, events []*session.Event) []string {
+	var out []string
+	for _, ev := range events {
+		d.BeginEvent(ev)
+		for _, part := range ev.Content.Parts {
+			if part.Text == "" {
+				continue
+			}
+			if ev.Content.Role == "thinking" || part.Thought {
+				if !d.SkipThinking(ev) {
+					out = append(out, part.Text)
+				}
+				continue
+			}
+			d.SkipText(ev)
+		}
+	}
+	return out
+}
+
+func TestStreamDedup_Thinking(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []*session.Event
+		want   []string
+	}{
+		{
+			// The dashboard double-thought bug: providers stream reasoning as
+			// role-thinking partials and then persist the same text on the
+			// aggregate as a Thought part. The aggregate copy must not reach
+			// the surface again.
+			name: "aggregate thought after live deltas is dropped",
+			events: []*session.Event{
+				thoughtEvent("thinking", "hmm ", true),
+				thoughtEvent("thinking", "deep", true),
+				thoughtEvent("model", "hmm deep", false),
+			},
+			want: []string{"hmm ", "deep"},
+		},
+		{
+			// A non-streaming provider sends only the aggregate Thought part;
+			// dropping it would leave surfaces that never saw live deltas
+			// without the reasoning at all.
+			name: "bare aggregate thought passes through",
+			events: []*session.Event{
+				thoughtEvent("model", "hmm", false),
+			},
+			want: []string{"hmm"},
+		},
+		{
+			// A think-then-call turn has no reply-text deltas, so its guard
+			// must be tracked separately: the reasoning streamed live, and the
+			// aggregate Thought part rides behind a function call.
+			name: "think-then-call drops the aggregate thought",
+			events: []*session.Event{
+				thoughtEvent("thinking", "plan", true),
+				thoughtEvent("model", "plan", false),
+				{LLMResponse: model.LLMResponse{Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "bash"}}},
+				}}},
+			},
+			want: []string{"plan"},
+		},
+		{
+			// The reasoning must not arm the reply-text guard: a turn whose
+			// answer arrives only on the aggregate (no streamed text) still
+			// gets its text through.
+			name: "thinking deltas do not suppress the aggregate text",
+			events: []*session.Event{
+				thoughtEvent("thinking", "hmm", true),
+				textEvent("model", "the answer", false),
+			},
+			want: []string{"hmm"},
+		},
+		{
+			// A tool round-trip resets both guards, so the next turn's bare
+			// aggregate passes through.
+			name: "tool round-trip resets the thought guard",
+			events: []*session.Event{
+				thoughtEvent("thinking", "one", true),
+				thoughtEvent("model", "one", false),
+				textEvent("user", "tool result", false),
+				thoughtEvent("model", "two", false),
+			},
+			want: []string{"one", "two"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d StreamDedup
+			got := feedThinking(&d, tt.events)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %q, want %q", got, tt.want)
+				}
+			}
+		})
+	}
 }
 
 func TestEventError(t *testing.T) {

@@ -41,8 +41,10 @@ func (m *openaiModel) generateChat(ctx context.Context, req *model.LLMRequest, m
 			params.ReasoningEffort = effort
 		}
 		// Sampling temperature rides both wire paths; nil leaves the field off
-		// so the server default stands (see LLMOptions.Temperature).
-		if m.temperature != nil {
+		// so the server default stands (see LLMOptions.Temperature). The kimi
+		// coding-plan endpoint 400s on every value but its own, so there the
+		// field stays off entirely (see kimiCodingOmitsTemperature).
+		if m.temperature != nil && !m.kimiCoding {
 			params.Temperature = param.NewOpt(*m.temperature)
 		}
 		if systemInstruction != "" {

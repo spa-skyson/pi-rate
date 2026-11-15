@@ -114,8 +114,10 @@ func (m *openaiModel) buildResponsesParams(req *model.LLMRequest, modelName stri
 		}
 		// Sampling temperature sits behind the same boundary: the codex
 		// backend's restricted Responses surface is reported to strip it, and
-		// a rejected or stripped field must not break the turn.
-		if m.temperature != nil {
+		// a rejected or stripped field must not break the turn. The kimi
+		// coding-plan endpoint rejects every value but its own outright, so
+		// the field stays off there too (see kimiCodingOmitsTemperature).
+		if m.temperature != nil && !m.kimiCoding {
 			params.Temperature = param.NewOpt(*m.temperature)
 		}
 	}

@@ -188,8 +188,16 @@ func isClosingByte(b byte) bool { return strings.IndexByte(`"')]*_`, b) >= 0 }
 // calls, and tool results. The caller must have called dedup.BeginEvent for ev.
 func (e *jsonEmitter) parts(ev *session.Event, dedup *agent.StreamDedup) {
 	for _, part := range ev.Content.Parts {
-		if part.Text != "" && ev.Content.Role == "thinking" {
-			e.text("thinking_delta", ev.Author, part.Text)
+		if part.Text != "" && (ev.Content.Role == "thinking" || part.Thought) {
+			// Reasoning: streaming-role partials and Thought-flagged parts of
+			// the final aggregate both emit as thinking_delta. The aggregate
+			// re-send of reasoning already streamed as deltas is suppressed
+			// the same way reply text is, so a turn does not print its
+			// thinking twice; SkipThinking also records the live deltas, which
+			// plain SkipText never saw.
+			if !dedup.SkipThinking(ev) {
+				e.text("thinking_delta", ev.Author, part.Text)
+			}
 			continue
 		}
 		if part.Text != "" {
