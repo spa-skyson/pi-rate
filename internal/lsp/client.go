@@ -193,7 +193,7 @@ func (c *Client) Close() error {
 		return err
 	case <-time.After(5 * time.Second):
 		_ = c.cmd.Process.Kill()
-		<-waitDone
+		_ = <-waitDone //nolint:staticcheck // the kill path discards the expected "signal: killed" wait error
 		select {
 		case <-c.done:
 		default:
