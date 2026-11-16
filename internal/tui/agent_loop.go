@@ -13,11 +13,9 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	adkmodel "google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 
-	"github.com/google/uuid"
 	"github.com/spa-skyson/pi-rate/internal/agent"
 	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/extension"
@@ -1327,92 +1325,14 @@ func (m *model) runAgentLoop(ctx context.Context, prompt string, ch chan agentMs
 
 // synthesizeStoppedResponses answers every function call in the session that
 // no function response follows with a synthetic error response naming the
-// stop reason. A turn that ends between persisting a call and receiving its
-// response — the loop auto-stop (issue #60), a cancel, a terminal failure —
-// otherwise leaves the call dangling forever: ADK drops it from every later
-// context build with a "dropping function calls with no matching function
-// response" warning, and the model never learns what happened to the tool.
-//
-// The scan is one reverse pass over the persisted events: a response marks
-// its id answered, a call with no later answer is an orphan, so the cost is
-// linear in history length and old orphans from earlier turns are healed
-// too. Appended events copy the shape of a real tool response (author,
-// invocation and node info come from the call's event), so ADK matches them
-// by id like any other pair. Best-effort: a failed append is logged and the
-// orphan is left for the next sweep.
+// stop reason; see pisession.SynthesizeStoppedResponses for the full story.
+// The logic lives in internal/session so a session resumed after a crash —
+// whose orphaned calls no in-process fail path ever saw — sweeps the same way.
 func synthesizeStoppedResponses(svc *pisession.FileService, sessionID, reason string, log *logger.Logger) {
-	if svc == nil || sessionID == "" {
+	if svc == nil {
 		return
 	}
-	resp, err := svc.Get(context.Background(), &session.GetRequest{
-		AppName:   agent.AppName,
-		UserID:    agent.DefaultUserID,
-		SessionID: sessionID,
-	})
-	if err != nil || resp == nil || resp.Session == nil {
-		log.Errorf("synthetic responses: reading session %s: %v", sessionID, err)
-		return
-	}
-	type orphan struct {
-		call *genai.FunctionCall
-		from *session.Event
-	}
-	events := resp.Session.Events()
-	answered := make(map[string]struct{}, events.Len())
-	var orphans []orphan
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
-		if ev == nil || ev.Content == nil {
-			continue
-		}
-		for _, part := range ev.Content.Parts {
-			if part == nil {
-				continue
-			}
-			if fr := part.FunctionResponse; fr != nil && fr.ID != "" {
-				answered[fr.ID] = struct{}{}
-			}
-			if fc := part.FunctionCall; fc != nil && fc.ID != "" {
-				if _, ok := answered[fc.ID]; !ok {
-					orphans = append(orphans, orphan{call: fc, from: ev})
-				}
-			}
-		}
-	}
-	for _, o := range orphans {
-		if err := svc.AppendEvent(context.Background(), resp.Session, stoppedResponseEvent(o.call, o.from, reason)); err != nil {
-			log.Errorf("synthetic response for %s: %v", o.call.ID, err)
-			continue
-		}
-		log.Info(fmt.Sprintf("synthesized function response for %s (%s): turn was stopped: %s", o.call.ID, o.call.Name, reason))
-	}
-}
-
-// stoppedResponseEvent builds the synthetic function-response event for one
-// orphaned call: the same shape a real tool response event carries (role
-// "user", the call's author, invocation and node info), with the error key
-// ADK tools use to report failure. ADK pairs it with the call by id.
-func stoppedResponseEvent(call *genai.FunctionCall, from *session.Event, reason string) *session.Event {
-	return &session.Event{
-		ID: uuid.NewString(),
-		LLMResponse: adkmodel.LLMResponse{
-			Content: &genai.Content{
-				Role: genai.RoleUser,
-				Parts: []*genai.Part{{
-					FunctionResponse: &genai.FunctionResponse{
-						ID:       call.ID,
-						Name:     call.Name,
-						Response: map[string]any{"error": "turn was stopped: " + reason},
-					},
-				}},
-			},
-		},
-		InvocationID: from.InvocationID,
-		Author:       from.Author,
-		Timestamp:    time.Now(),
-		Actions:      session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}},
-		NodeInfo:     from.NodeInfo,
-	}
+	pisession.SynthesizeStoppedResponses(context.Background(), svc, agent.AppName, agent.DefaultUserID, sessionID, reason, log)
 }
 
 // rootCause unwraps err down to its innermost cause, for display. A

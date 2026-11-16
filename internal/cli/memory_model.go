@@ -104,7 +104,7 @@ func runMemoryModelStatus(modelPath string) error {
 	}
 
 	// Check for model directory with the expected name.
-	modelDir := filepath.Join(modelPath, "sentence-transformers_all-MiniLM-L6-v2")
+	modelDir := filepath.Join(modelPath, palace.DefaultModelDirName)
 	info, err := os.Stat(modelDir)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -1457,6 +1457,9 @@ func TestBuildParallelPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "ONE OF TWO coordinators") {
 		t.Error("should explain parallel assignment")
 	}
+	if !strings.Contains(prompt, "implementing ONLY these slices") {
+		t.Error("parallel prompt must tell the coordinator to implement its slices itself")
+	}
 	if !strings.Contains(prompt, "Your Role: Coordinator") {
 		t.Error("parallel prompt should carry the coordinator contract")
 	}
@@ -1956,7 +1959,8 @@ func TestBuildRunPrompt_CarriesCoordinatorContract(t *testing.T) {
 
 	for _, want := range []string{
 		"Your Role: Coordinator",
-		`{agent: "cabin-boy"`,
+		"Implementing a slice",
+		"verify command",
 		"captain",
 		"VERDICT: PASS",
 		"specs/my-feature/plan.md",
@@ -1966,9 +1970,18 @@ func TestBuildRunPrompt_CarriesCoordinatorContract(t *testing.T) {
 		}
 	}
 
-	// Worktree agents would silently discard their edits into a nested worktree.
-	if !strings.Contains(prompt, "Never spawn `cabin-boy`") {
-		t.Error("run prompt should forbid delegating to [worktree] agents")
+	// The coordinator implements slices itself: /run merges only the run
+	// worktree, so a coding [worktree] subagent's edits would be silently lost.
+	if !strings.Contains(prompt, "NEVER delegate coding to a subagent") {
+		t.Error("run prompt should forbid delegating coding slices to subagents")
+	}
+	if !strings.Contains(prompt, "never spawn a coding agent") {
+		t.Error("run prompt should forbid spawning coding [worktree] agents from a run")
+	}
+	// Delegation stays read-only: research (skipper) and review/second opinion
+	// (captain) subagents are the only spawns a run may make.
+	if !strings.Contains(prompt, "skipper") {
+		t.Error("run prompt should name the research subagent for delegation")
 	}
 }
 

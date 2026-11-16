@@ -298,7 +298,11 @@ func palacePaths(cfg config.Config) (dbPath, modelPath string) {
 		dbPath = filepath.Join(home, ".pirate", "palace.db")
 	}
 	if modelPath == "" {
-		modelPath = filepath.Join(home, ".pirate", "models", "KnightsAnalytics_all-MiniLM-L6-v2")
+		// The embedder's open path must equal the path `memory model
+		// download` writes (palace.DefaultModelPath, the same source cli's
+		// palaceConfigFromCLI falls back to): split literals meant a
+		// downloaded model sat where no embedder looked.
+		modelPath = palace.DefaultModelPath()
 	}
 	return dbPath, modelPath
 }

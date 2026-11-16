@@ -1,17 +1,19 @@
 package cli
 
 import (
-	"path/filepath"
-
 	"github.com/spf13/cobra"
 
 	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/palace"
 )
 
-// defaultPalaceModelPath returns the default embedding model path.
+// defaultPalaceModelPath returns the default embedding model path. The
+// palace package owns the value (palace.DefaultModelPath) so the download
+// target and every embedder's open path cannot drift apart — split literals
+// here and in palaceConfigFromCLI meant the download wrote a cache the
+// embedder never looked at.
 func defaultPalaceModelPath() string {
-	return filepath.Join(config.PirateHome(), "models", "sentence-transformers_all-MiniLM-L6-v2")
+	return palace.DefaultModelPath()
 }
 
 // resolvePalaceConfig resolves the user's palace section onto the defaults,

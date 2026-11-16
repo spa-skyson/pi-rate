@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spa-skyson/pi-rate/internal/config"
 	"github.com/spa-skyson/pi-rate/internal/palace"
 	"github.com/spa-skyson/pi-rate/internal/testenv"
 )
@@ -184,6 +185,37 @@ func TestRunMemoryModelDownload_DefaultDest(t *testing.T) {
 	}
 	if !strings.Contains(out, "Model downloaded: model-path") {
 		t.Errorf("output = %q, want the downloaded path reported", out)
+	}
+}
+
+// TestPalaceModelPathAgreesWithDownloadTarget pins the two-sided contract
+// between the download and cli's open path: the directory `memory model
+// download` writes to and the model path cli's palace falls back to
+// (palace.DefaultModelPath, the single source for both) must name the same
+// location — split literals once made the download write a cache no embedder
+// ever read. The third open path, piagent's palacePaths, is pinned to the
+// same source by TestPalacePaths in piagent/build_test.go.
+func TestPalaceModelPathAgreesWithDownloadTarget(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	got := stubDownloadModel(t, "model-path", nil)
+
+	out := captureStdout(t, func() {
+		if err := runMemoryModelDownload("", ""); err != nil {
+			t.Fatalf("runMemoryModelDownload: %v", err)
+		}
+	})
+	_ = out
+
+	want := palace.DefaultModelPath()
+	if got.dest != filepath.Dir(want) {
+		t.Errorf("download dest = %q, want the parent of the open path %q", got.dest, filepath.Dir(want))
+	}
+	if openPath := defaultPalaceModelPath(); openPath != want {
+		t.Errorf("cli default model path = %q, want %q", openPath, want)
+	}
+	if openPath := palaceConfigFromCLI(&config.Config{}).ModelPath; openPath != want {
+		t.Errorf("palaceConfigFromCLI fallback = %q, want %q", openPath, want)
 	}
 }
 

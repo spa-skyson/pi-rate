@@ -30,6 +30,11 @@ type Skill struct {
 	// on demand. Empty for bundled skills (their body is read from the
 	// embedded filesystem via the bundledSkillsFS key).
 	BodyPath string
+	// BaseDir is the skill's own directory (the parent of SKILL.md): the
+	// anchor for auxiliary files the skill ships (references/, scripts/,
+	// assets/). Empty for bundled skills and any other skill without an
+	// on-disk BodyPath.
+	BaseDir string
 	// Tools lists tool names this skill is allowed to use (from frontmatter).
 	Tools []string
 	// Source is where the skill came from: "bundled", "user", or "project".
@@ -284,8 +289,11 @@ func parseSkillFile(path string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	// Record the on-disk path so LoadSkillBody can read it lazily.
+	// Record the on-disk path so LoadSkillBody can read it lazily, and the
+	// skill's own directory so the agent can be told where auxiliary files
+	// (references/, scripts/, assets/) live.
 	skill.BodyPath = path
+	skill.BaseDir = filepath.Dir(path)
 	return skill, nil
 }
 

@@ -83,6 +83,32 @@ Do something.
 	if skill.Name != "my-skill" {
 		t.Errorf("name = %q, want %q", skill.Name, "my-skill")
 	}
+	if skill.BaseDir != skillDir {
+		t.Errorf("BaseDir = %q, want %q", skill.BaseDir, skillDir)
+	}
+}
+
+func TestBundledSkillNoBaseDir(t *testing.T) {
+	// Bundled skills are read from the embedded filesystem: parseSkillFile —
+	// the only place BaseDir is populated — never sees them, so their
+	// AppendActiveSkill prompt carries no files-hint line. Load a real
+	// bundled skill the way production does and pin BaseDir empty.
+	skills, err := LoadSkills()
+	if err != nil {
+		t.Fatalf("LoadSkills: %v", err)
+	}
+	if len(skills) == 0 {
+		t.Fatal("LoadSkills returned no bundled skills")
+	}
+	for _, s := range skills {
+		if s.Source != "bundled" {
+			t.Errorf("skill %q has source %q, want bundled (LoadSkills without dirs)", s.Name, s.Source)
+			continue
+		}
+		if s.BaseDir != "" {
+			t.Errorf("bundled skill %q has BaseDir %q, want empty", s.Name, s.BaseDir)
+		}
+	}
 }
 
 func TestLoadSkills(t *testing.T) {
