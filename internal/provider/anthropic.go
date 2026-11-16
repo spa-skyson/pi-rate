@@ -609,7 +609,12 @@ type antToolUseAcc struct {
 
 // antStreamState holds accumulated state from processing Anthropic stream events.
 type antStreamState struct {
-	text                string
+	text string
+	// thinking accumulates the reasoning deltas the model streamed before its
+	// answer. It rides the final response as a Thought part (see
+	// buildAntFinalResponse) so the transcript keeps it; the streaming
+	// partials the consumer already saw are not re-sent.
+	thinking            string
 	toolUse             map[int]antToolUseAcc
 	stopReason          anthropic.StopReason
 	inputTokens         int64
@@ -643,6 +648,11 @@ func buildAntFinalResponse(s *antStreamState) *model.LLMResponse {
 			finalParts = append(finalParts, p)
 		}
 	}
+	// Reasoning streamed ahead of the answer or the tool calls persists as a
+	// Thought part. A thinking-only stream attaches nothing — no provider
+	// fallback fabricates an answer here, matching the pre-Thought behavior
+	// where such a turn ended with empty content.
+	finalParts = attachThought(finalParts, s.thinking)
 
 	var usage *genai.GenerateContentResponseUsageMetadata
 	if s.inputTokens > 0 || s.outputTokens > 0 {
@@ -718,6 +728,7 @@ func antHandleContentBlockDelta(e anthropic.ContentBlockDeltaEvent, state *antSt
 		if !ok {
 			return true
 		}
+		state.thinking += thinkingDelta.Thinking
 		return yield(&model.LLMResponse{
 			Partial:      true,
 			TurnComplete: false,
@@ -775,6 +786,7 @@ func antRunNonStreaming(ctx context.Context, client *anthropic.Client, params an
 	}
 
 	parts := make([]*genai.Part, 0, len(message.Content))
+	thinking := ""
 	for _, block := range message.Content {
 		switch block.Type {
 		case "text":
@@ -785,7 +797,7 @@ func antRunNonStreaming(ctx context.Context, client *anthropic.Client, params an
 			// Handle thinking blocks from models like qwen3.5 that only return thinking
 			// Extract thinking content as the response text
 			if thinkingBlock, ok := block.AsAny().(anthropic.ThinkingBlock); ok {
-				parts = append(parts, &genai.Part{Text: thinkingBlock.Thinking})
+				thinking += thinkingBlock.Thinking
 			}
 		case "tool_use":
 			if toolUse, ok := block.AsAny().(anthropic.ToolUseBlock); ok {
@@ -797,6 +809,13 @@ func antRunNonStreaming(ctx context.Context, client *anthropic.Client, params an
 				parts = append(parts, p)
 			}
 		}
+	}
+	// Thinking alongside an answer or tool use persists as a Thought part; a
+	// thinking-only completion falls back to the thinking as the turn's plain
+	// content, which is the answer models like qwen3.5 have.
+	parts = attachThought(parts, thinking)
+	if len(parts) == 0 && thinking != "" {
+		parts = append(parts, &genai.Part{Text: persistThoughtText(thinking)})
 	}
 
 	var usage *genai.GenerateContentResponseUsageMetadata

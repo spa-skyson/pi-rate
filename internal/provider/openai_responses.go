@@ -221,10 +221,10 @@ func (m *openaiModel) sendResponses(
 		// than replaying the same rejected id.
 		m.clearPreviousResponseID()
 		if stream {
-			_ = y(&model.LLMResponse{ErrorCode: "STREAM_ERROR", ErrorMessage: err.Error()}, nil)
+			_ = y(&model.LLMResponse{ErrorCode: "STREAM_ERROR", ErrorMessage: oaiErrorText(err)}, nil)
 			return
 		}
-		_ = y(nil, fmt.Errorf("OpenAI Responses API failed: %w", err))
+		_ = y(nil, newOaiRenderedError("OpenAI Responses API failed", err))
 	}
 }
 
@@ -378,7 +378,7 @@ func oaiAppendResponsesItems(
 			continue
 		}
 		switch {
-		case part.Text != "":
+		case part.Text != "" && !part.Thought:
 			n := len(segments) - 1
 			if n >= 0 && segments[n].image.Data == nil {
 				segments[n].text += "\n" + part.Text
@@ -783,9 +783,12 @@ func (m *openaiModel) finishResponsesStream(state *responsesStreamState, finalRe
 func buildResponsesFinalParts(s *responsesStreamState) []*genai.Part {
 	parts := make([]*genai.Part, 0, 1+len(s.toolCalls))
 
-	// Reasoning content (if any).
+	// Reasoning content (if any), persisted as a Thought part so the
+	// transcript keeps it while the providers keep it out of the next prompt.
+	// A reasoning-only stream falls back to the reasoning as the turn's plain
+	// content, so the turn is never read by ADK as thought-only.
 	if s.reasoning.Len() > 0 {
-		parts = append(parts, &genai.Part{Text: s.reasoning.String()})
+		parts = append(parts, &genai.Part{Text: persistThoughtText(s.reasoning.String()), Thought: true})
 	}
 
 	// Text content.
@@ -812,7 +815,7 @@ func buildResponsesFinalParts(s *responsesStreamState) []*genai.Part {
 		}
 	}
 
-	return parts
+	return ensureAnswerPart(parts)
 }
 
 // runResponsesNonStreaming processes a non-streaming Responses call. Like the
@@ -872,6 +875,7 @@ func (m *openaiModel) runResponsesNonStreaming(ctx context.Context, params respo
 func parseResponsesOutput(items []responses.ResponseOutputItemUnion) ([]*genai.Part, string) {
 	var parts []*genai.Part
 	var finishReason string
+	var reasoning strings.Builder
 
 	for _, item := range items {
 		switch variant := item.AsAny().(type) {
@@ -907,15 +911,22 @@ func parseResponsesOutput(items []responses.ResponseOutputItemUnion) ([]*genai.P
 			// conversation.
 
 		case responses.ResponseReasoningItem:
-			// Raw reasoning tokens.
+			// Raw reasoning tokens, accumulated into one Thought part: kept
+			// in the transcript, stripped from the next prompt (see
+			// oaiAppendResponsesItems), capped like every persisted thought.
+			// ensureAnswerPart below guards the reasoning-only shape.
 			for _, c := range variant.Content {
-				parts = append(parts, &genai.Part{Text: c.Text})
+				reasoning.WriteString(c.Text)
 			}
 			// Encrypted reasoning for ZDR (not currently used by pi-go).
 		}
 	}
 
-	return parts, finishReason
+	if reasoning.Len() > 0 {
+		parts = append(parts, &genai.Part{Text: persistThoughtText(reasoning.String()), Thought: true})
+	}
+
+	return ensureAnswerPart(parts), finishReason
 }
 
 // sourceHostLabel reduces a source URL to the host a reader recognizes, so a

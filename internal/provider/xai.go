@@ -162,10 +162,13 @@ func (m *xaiModel) sendXAIResponses(ctx context.Context, params responses.Respon
 		return
 	}
 	if stream {
-		_ = y(&model.LLMResponse{ErrorCode: "STREAM_ERROR", ErrorMessage: err.Error()}, nil)
+		_ = y(&model.LLMResponse{ErrorCode: "STREAM_ERROR", ErrorMessage: oaiErrorText(err)}, nil)
 		return
 	}
-	_ = y(nil, fmt.Errorf("xAI Responses API failed: %w", err))
+	// The rendered error keeps the intro prefix and appends the server's own
+	// message (see oaiErrorText) — the wording that names what to fix, not
+	// the bare status summary.
+	_ = y(nil, newOaiRenderedError("xAI Responses API failed", err))
 }
 
 // xaiRequestTools is the function declarations from the ADK request plus

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -336,8 +337,9 @@ func TestMistralAnswerText(t *testing.T) {
 }
 
 // TestMistralNonStreamingThinking pins the whole non-streaming path: the
-// thinking text is prepended as its own part and the answer part carries the
-// text, not the raw JSON array the SDK decoded into Content.
+// thinking text rides its own Thought-flagged part ahead of the answer, and the
+// answer part carries the text, not the raw JSON array the SDK decoded into
+// Content.
 func TestMistralNonStreamingThinking(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -370,11 +372,11 @@ func TestMistralNonStreamingThinking(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("expected 2 parts (thinking + answer), got %d: %+v", len(parts), parts)
 	}
-	if parts[0].Text != "step one step two" {
-		t.Errorf("thinking part = %q, want %q", parts[0].Text, "step one step two")
+	if parts[0].Text != "step one step two" || !parts[0].Thought {
+		t.Errorf("thinking part = %q (thought=%v), want %q flagged Thought", parts[0].Text, parts[0].Thought, "step one step two")
 	}
-	if parts[1].Text != "the answer" {
-		t.Errorf("answer part = %q, want %q", parts[1].Text, "the answer")
+	if parts[1].Text != "the answer" || parts[1].Thought {
+		t.Errorf("answer part = %q (thought=%v), want %q unflagged", parts[1].Text, parts[1].Thought, "the answer")
 	}
 }
 
@@ -431,7 +433,15 @@ func TestMistralStreamingThinking(t *testing.T) {
 	if last == nil || !last.TurnComplete {
 		t.Fatal("expected a final TurnComplete response")
 	}
-	if len(last.Content.Parts) == 0 || last.Content.Parts[0].Text != "Hello world" {
-		t.Errorf("final content = %+v, want the answer text intact", last.Content.Parts)
+	// The aggregate carries the reasoning as a Thought part ahead of the
+	// answer, so a reload of the session keeps it.
+	if len(last.Content.Parts) != 2 ||
+		last.Content.Parts[0].Text != "first second" || !last.Content.Parts[0].Thought ||
+		last.Content.Parts[1].Text != "Hello world" || last.Content.Parts[1].Thought {
+		parts := make([]string, 0, len(last.Content.Parts))
+		for _, p := range last.Content.Parts {
+			parts = append(parts, fmt.Sprintf("{text:%q thought:%v}", p.Text, p.Thought))
+		}
+		t.Errorf("final content = %v, want [{first second thought} {Hello world}]", parts)
 	}
 }

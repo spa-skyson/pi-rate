@@ -768,7 +768,11 @@ func (s *ollamaStreamState) finalParts() []*genai.Part {
 		// — and firing it there restates the reasoning as if it were the answer
 		// (seen with minimax-m3:cloud: "The user wants me to run a bash
 		// command..." printed above the real reply).
-		finalParts = append(finalParts, &genai.Part{Text: s.aggregatedThinking})
+		//
+		// Capped like a Thought part — it is still reasoning text being written
+		// to events.jsonl — and returned directly: this plain text IS the whole
+		// turn, so attachThought below must not add a flagged copy of it.
+		return append(finalParts, &genai.Part{Text: persistThoughtText(s.aggregatedThinking)})
 	}
 	for _, tc := range s.toolCalls {
 		args := tc.Function.Arguments.ToMap()
@@ -776,7 +780,14 @@ func (s *ollamaStreamState) finalParts() []*genai.Part {
 		p.FunctionCall.ID = tc.ID
 		finalParts = append(finalParts, p)
 	}
-	return finalParts
+	// A turn that reasoned and then answered (or called tools) persists the
+	// reasoning as a Thought part — this is the path GLM models served through
+	// Ollama take, whose reasoning reaches Message.Thinking and whose final
+	// answer used to overwrite it. The Thought flag keeps the reasoning out of
+	// the next prompt (see genaiSplitParts) while events.jsonl keeps it for the
+	// transcript. Runs after the tool calls are appended so a think-then-call
+	// turn counts as answered.
+	return attachThought(finalParts, s.aggregatedThinking)
 }
 
 // finalResponse builds the terminal response for the completed turn.
