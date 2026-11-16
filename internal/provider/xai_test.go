@@ -550,10 +550,14 @@ func TestXAIRejectsNilRequest(t *testing.T) {
 
 // A send failure surfaces differently by mode: streaming reports it as a
 // content-less response carrying STREAM_ERROR (which is what lets retryStream
-// see it), non-streaming as a wrapped Go error.
+// see it), non-streaming as a wrapped Go error. Both must carry the server's
+// own message — the wording that names what to fix — not the bare status
+// summary (see oaiErrorText).
 func TestXAISendErrorSurfaces(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, `{"error":{"message":"invalid request"}}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid request","type":"invalid_request_error"}}`))
 	}))
 	defer srv.Close()
 
@@ -576,6 +580,9 @@ func TestXAISendErrorSurfaces(t *testing.T) {
 		if got := errs[0].Error(); !strings.Contains(got, "xAI Responses API failed") {
 			t.Errorf("error = %q, want it wrapped with the xAI Responses prefix", got)
 		}
+		if got := errs[0].Error(); !strings.Contains(got, "invalid request") {
+			t.Errorf("error = %q, want the server's message, not the bare status summary", got)
+		}
 	})
 
 	t.Run("streaming", func(t *testing.T) {
@@ -592,8 +599,8 @@ func TestXAISendErrorSurfaces(t *testing.T) {
 		if got := resps[0].ErrorCode; got != "STREAM_ERROR" {
 			t.Errorf("ErrorCode = %q, want STREAM_ERROR", got)
 		}
-		if resps[0].ErrorMessage == "" {
-			t.Error("ErrorMessage is empty; the provider failure is invisible without it")
+		if got := resps[0].ErrorMessage; !strings.Contains(got, "invalid request") {
+			t.Errorf("ErrorMessage = %q, want the server's message, not the bare status summary", got)
 		}
 	})
 }

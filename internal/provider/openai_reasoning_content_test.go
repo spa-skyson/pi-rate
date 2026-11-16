@@ -229,8 +229,16 @@ func TestOpenAIStreamingReasoningContentBecomesThinking(t *testing.T) {
 	if last == nil || !last.TurnComplete {
 		t.Fatal("expected a final TurnComplete response")
 	}
-	if len(last.Content.Parts) != 1 || last.Content.Parts[0].Text != "Hello" {
-		t.Errorf("final content = %+v, want the answer text alone", last.Content.Parts)
+	// The reasoning rides the aggregate as a Thought part ahead of the answer;
+	// the answer itself stays the only unflagged text.
+	if len(last.Content.Parts) != 2 ||
+		last.Content.Parts[0].Text != "first second" || !last.Content.Parts[0].Thought ||
+		last.Content.Parts[1].Text != "Hello" || last.Content.Parts[1].Thought {
+		parts := make([]string, 0, len(last.Content.Parts))
+		for _, p := range last.Content.Parts {
+			parts = append(parts, fmt.Sprintf("{text:%q thought:%v}", p.Text, p.Thought))
+		}
+		t.Errorf("final parts = %v, want [{first second thought} {Hello}]", parts)
 	}
 }
 

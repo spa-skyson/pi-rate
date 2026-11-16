@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"iter"
 	"slices"
 	"strings"
@@ -109,11 +108,17 @@ func genaiFunctionResponses(contents []*genai.Content) map[string]*genai.Functio
 
 // genaiSplitParts splits one content's parts into its text fragments and its
 // function calls. A part with text is never also read as a function call.
+//
+// Thought-flagged text parts are skipped from both: they carry the reasoning a
+// turn streamed before its answer (see thought.go), which the session history
+// keeps for the transcript but which must not replay into the prompt — a
+// request that re-sent the reasoning would bill it twice and read to the model
+// as if its own scratch work were part of the conversation.
 func genaiSplitParts(parts []*genai.Part) ([]string, []*genai.FunctionCall) {
 	var textParts []string
 	var functionCalls []*genai.FunctionCall
 	for _, part := range parts {
-		if part == nil {
+		if part == nil || part.Thought {
 			continue
 		}
 		if part.Text != "" {
@@ -380,6 +385,15 @@ func buildOaiFinalResponse(s *oaiStreamState) *model.LLMResponse {
 	}
 	slices.Sort(indices)
 
+	var usage *genai.GenerateContentResponseUsageMetadata
+	if s.promptTokens > 0 || s.completionTokens > 0 {
+		usage = &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:        int32(s.promptTokens),
+			CandidatesTokenCount:    int32(s.completionTokens),
+			CachedContentTokenCount: int32(s.cachedTokens),
+		}
+	}
+
 	finalParts := make([]*genai.Part, 0, 2+len(s.toolCalls))
 	if s.text != "" {
 		finalParts = append(finalParts, &genai.Part{Text: s.text})
@@ -389,8 +403,20 @@ func buildOaiFinalResponse(s *oaiStreamState) *model.LLMResponse {
 		// reasoning as the turn's content rather than returning nothing —
 		// the same fallback the Ollama provider applies to thinking-only
 		// turns. Skipped when tool calls follow, where the reasoning is
-		// scratch work ahead of the calls.
-		finalParts = append(finalParts, &genai.Part{Text: s.thinking})
+		// scratch work ahead of the calls. Capped like a Thought part — it
+		// is still reasoning text being written to events.jsonl — and
+		// returned directly: this plain text IS the whole turn, so
+		// attachThought below must not add a flagged copy of it.
+		return &model.LLMResponse{
+			Partial:       false,
+			TurnComplete:  true,
+			FinishReason:  oaiFinishReasonToGenai(s.finishReason),
+			UsageMetadata: usage,
+			Content: &genai.Content{
+				Role:  string(genai.RoleModel),
+				Parts: []*genai.Part{{Text: persistThoughtText(s.thinking)}},
+			},
+		}
 	}
 	for _, idx := range indices {
 		tc := s.toolCalls[idx]
@@ -410,15 +436,13 @@ func buildOaiFinalResponse(s *oaiStreamState) *model.LLMResponse {
 			finalParts = append(finalParts, p)
 		}
 	}
+	// A turn that reasoned and then answered (or called tools) persists the
+	// reasoning as a Thought part: it reaches events.jsonl with the turn, the
+	// transcript keeps it, and the providers strip it from the next prompt.
+	// Runs after the tool calls are appended so a think-then-call turn counts
+	// as answered.
+	finalParts = attachThought(finalParts, s.thinking)
 
-	var usage *genai.GenerateContentResponseUsageMetadata
-	if s.promptTokens > 0 || s.completionTokens > 0 {
-		usage = &genai.GenerateContentResponseUsageMetadata{
-			PromptTokenCount:        int32(s.promptTokens),
-			CandidatesTokenCount:    int32(s.completionTokens),
-			CachedContentTokenCount: int32(s.cachedTokens),
-		}
-	}
 	return &model.LLMResponse{
 		Partial:       false,
 		TurnComplete:  true,
@@ -553,7 +577,7 @@ func oaiRunStreamingHooks(ctx context.Context, client *openai.Client, params ope
 			_ = yield(canceledResponse(), nil)
 			return
 		}
-		_ = yield(&model.LLMResponse{ErrorCode: "STREAM_ERROR", ErrorMessage: err.Error()}, nil)
+		_ = yield(&model.LLMResponse{ErrorCode: "STREAM_ERROR", ErrorMessage: oaiErrorText(err)}, nil)
 		return
 	}
 
@@ -631,7 +655,7 @@ func oaiRunNonStreamingExtract(ctx context.Context, client *openai.Client, param
 func oaiRunNonStreamingHooks(ctx context.Context, client *openai.Client, params openai.ChatCompletionNewParams, yield func(*model.LLMResponse, error) bool, hooks oaiExtractHooks) {
 	completion, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {
-		yield(nil, fmt.Errorf("OpenAI chat completion failed: %w", err))
+		yield(nil, newOaiRenderedError("OpenAI chat completion failed", err))
 		return
 	}
 	if len(completion.Choices) == 0 {
@@ -644,8 +668,9 @@ func oaiRunNonStreamingHooks(ctx context.Context, client *openai.Client, params 
 	choice := completion.Choices[0]
 	msg := choice.Message
 	parts := make([]*genai.Part, 0, 2+len(msg.ToolCalls))
-	if thinking := hooks.messageThinking(completion.RawJSON()); thinking != "" {
-		parts = append(parts, &genai.Part{Text: thinking})
+	thinking := ""
+	if hooks.messageThinking != nil {
+		thinking = hooks.messageThinking(completion.RawJSON())
 	}
 	if text := hooks.answer(msg.Content); text != "" {
 		parts = append(parts, &genai.Part{Text: text})
@@ -661,6 +686,14 @@ func oaiRunNonStreamingHooks(ctx context.Context, client *openai.Client, params 
 			p.ThoughtSignature = oaiThoughtSignature(tc.RawJSON())
 			parts = append(parts, p)
 		}
+	}
+	// Reasoning alongside an answer or tool calls persists as a Thought part;
+	// a reasoning-only completion falls back to the thinking as the turn's
+	// plain content, so the part list is never left without anything the turn
+	// "said" and ADK never reads the turn as thought-only.
+	parts = attachThought(parts, thinking)
+	if len(parts) == 0 && thinking != "" {
+		parts = append(parts, &genai.Part{Text: persistThoughtText(thinking)})
 	}
 	var usage *genai.GenerateContentResponseUsageMetadata
 	if completion.Usage.PromptTokens > 0 || completion.Usage.CompletionTokens > 0 {

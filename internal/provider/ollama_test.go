@@ -966,7 +966,9 @@ func TestOllamaRunStreaming_ThinkingOnlyTurnFallsBackToThinking(t *testing.T) {
 	}
 	var text string
 	for _, p := range last.Content.Parts {
-		text += p.Text
+		if !p.Thought {
+			text += p.Text
+		}
 	}
 	if text != "the answer is 42" {
 		t.Errorf("aggregate text = %q, want the thinking content as the answer", text)
@@ -976,8 +978,9 @@ func TestOllamaRunStreaming_ThinkingOnlyTurnFallsBackToThinking(t *testing.T) {
 // TestOllamaRunStreaming_ThinkingNotLeakedWhenToolCalled is the regression for
 // minimax-m3:cloud printing its reasoning ("The user wants me to run a bash
 // command...") as if it were the reply. A turn that thinks and then calls a
-// tool has already produced output, so the thinking-only fallback must not fire
-// and restate the reasoning as visible text.
+// tool must not restate the reasoning as answer text; the reasoning still
+// reaches the transcript, flagged Thought so it reads as reasoning everywhere
+// downstream.
 func TestOllamaRunStreaming_ThinkingNotLeakedWhenToolCalled(t *testing.T) {
 	srv := newMockOllamaServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
@@ -1016,17 +1019,19 @@ func TestOllamaRunStreaming_ThinkingNotLeakedWhenToolCalled(t *testing.T) {
 		t.Fatal("expected non-nil content on the aggregate")
 	}
 
-	var foundFC bool
-	for _, p := range last.Content.Parts {
-		if p.FunctionCall != nil {
-			foundFC = true
-		}
-		if p.Text != "" {
-			t.Errorf("aggregate leaked thinking as visible text: %q", p.Text)
-		}
+	// The aggregate carries exactly two parts: the reasoning as a Thought
+	// part, then the FunctionCall. Anything else is either a leak of the
+	// reasoning as visible text or a lost part.
+	if len(last.Content.Parts) != 2 {
+		t.Fatalf("aggregate parts = %d (%+v), want 2 (thought + function call)",
+			len(last.Content.Parts), last.Content.Parts)
 	}
-	if !foundFC {
-		t.Error("expected the FunctionCall part to survive")
+	thought, fcPart := last.Content.Parts[0], last.Content.Parts[1]
+	if !thought.Thought || thought.Text != "I should call the tool" {
+		t.Errorf("parts[0] = {text:%q thought:%v}, want the reasoning persisted as a Thought part", thought.Text, thought.Thought)
+	}
+	if fcPart.FunctionCall == nil {
+		t.Errorf("parts[1] = %+v, want the FunctionCall part to survive", fcPart)
 	}
 
 	// The reasoning must still reach the UI on its own "thinking"-role event,

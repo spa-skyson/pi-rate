@@ -1378,15 +1378,17 @@ func TestOllamaStreamState_EmitPropagatesCancel(t *testing.T) {
 
 func TestOllamaStreamState_FinalParts(t *testing.T) {
 	tests := []struct {
-		name      string
-		state     *ollamaStreamState
-		wantTexts []string
-		wantCalls int
+		name         string
+		state        *ollamaStreamState
+		wantTexts    []string
+		wantThoughts []string
+		wantCalls    int
 	}{
 		{
-			name:      "text wins over thinking",
-			state:     &ollamaStreamState{aggregatedText: "answer", aggregatedThinking: "reasoning"},
-			wantTexts: []string{"answer"},
+			name:         "text wins over thinking; reasoning persists as a Thought part",
+			state:        &ollamaStreamState{aggregatedText: "answer", aggregatedThinking: "reasoning"},
+			wantTexts:    []string{"answer"},
+			wantThoughts: []string{"reasoning"},
 		},
 		{
 			name:      "thinking fallback when no text and no tool calls",
@@ -1394,13 +1396,13 @@ func TestOllamaStreamState_FinalParts(t *testing.T) {
 			wantTexts: []string{"reasoning"},
 		},
 		{
-			name: "no thinking fallback when a tool was called",
+			name: "no thinking fallback when a tool was called, but the reasoning persists",
 			state: &ollamaStreamState{
 				aggregatedThinking: "reasoning",
 				toolCalls:          []ollamaapi.ToolCall{{ID: "tc1"}},
 			},
-			wantTexts: nil,
-			wantCalls: 1,
+			wantThoughts: []string{"reasoning"},
+			wantCalls:    1,
 		},
 		{
 			name:      "empty state yields no parts",
@@ -1411,12 +1413,33 @@ func TestOllamaStreamState_FinalParts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			parts := tt.state.finalParts()
-			if len(parts) != len(tt.wantTexts)+tt.wantCalls {
-				t.Fatalf("parts = %d, want %d", len(parts), len(tt.wantTexts)+tt.wantCalls)
+			var gotTexts, gotThoughts []string
+			gotCalls := 0
+			for _, p := range parts {
+				switch {
+				case p.FunctionCall != nil:
+					gotCalls++
+				case p.Thought:
+					gotThoughts = append(gotThoughts, p.Text)
+				default:
+					gotTexts = append(gotTexts, p.Text)
+				}
+			}
+			// Length before any indexing, so an unexpected category is named
+			// as extra/missing parts — never a negative-index read.
+			if len(gotTexts) != len(tt.wantTexts) || len(gotThoughts) != len(tt.wantThoughts) || gotCalls != tt.wantCalls {
+				t.Fatalf("got %d texts %q, %d thoughts %q, %d calls; want %d texts %q, %d thoughts %q, %d calls",
+					len(gotTexts), gotTexts, len(gotThoughts), gotThoughts, gotCalls,
+					len(tt.wantTexts), tt.wantTexts, len(tt.wantThoughts), tt.wantThoughts, tt.wantCalls)
 			}
 			for i, want := range tt.wantTexts {
-				if parts[i].Text != want {
-					t.Errorf("parts[%d].Text = %q, want %q", i, parts[i].Text, want)
+				if gotTexts[i] != want {
+					t.Errorf("text part %d = %q, want %q", i, gotTexts[i], want)
+				}
+			}
+			for i, want := range tt.wantThoughts {
+				if gotThoughts[i] != want {
+					t.Errorf("thought part %d = %q, want %q", i, gotThoughts[i], want)
 				}
 			}
 		})

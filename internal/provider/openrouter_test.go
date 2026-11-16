@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -461,12 +462,16 @@ func TestOpenRouterStreamingReasoning(t *testing.T) {
 	if final == nil {
 		t.Fatal("expected a final TurnComplete response")
 	}
-	if len(final.Content.Parts) != 1 || final.Content.Parts[0].Text != "The answer is 42." {
+	// The reasoning rides the aggregate as a Thought part ahead of the answer;
+	// the answer itself stays the only unflagged text.
+	if len(final.Content.Parts) != 2 ||
+		final.Content.Parts[0].Text != "Let me think about it." || !final.Content.Parts[0].Thought ||
+		final.Content.Parts[1].Text != "The answer is 42." || final.Content.Parts[1].Thought {
 		parts := make([]string, 0, len(final.Content.Parts))
 		for _, p := range final.Content.Parts {
-			parts = append(parts, p.Text)
+			parts = append(parts, fmt.Sprintf("{text:%q thought:%v}", p.Text, p.Thought))
 		}
-		t.Errorf("final parts = %v, want [The answer is 42.]", parts)
+		t.Errorf("final parts = %v, want [{Let me think about it. thought} {The answer is 42.}]", parts)
 	}
 }
 
@@ -508,16 +513,18 @@ func TestOpenRouterStreamingReasoningDetails(t *testing.T) {
 		if resp.Content == nil || len(resp.Content.Parts) == 0 {
 			continue
 		}
-		text := resp.Content.Parts[0].Text
 		switch {
 		case resp.Content.Role == "thinking" && resp.Partial:
 			sawThinkingPartial = true
-			gotThinking += text
+			gotThinking += resp.Content.Parts[0].Text
 		case !resp.Partial && resp.TurnComplete:
-			if text == "Step one." {
-				gotThinking += "(aggregate:" + text + ")"
-			} else {
-				gotAnswer += text
+			for _, p := range resp.Content.Parts {
+				// The aggregate's reasoning rides a Thought-flagged part.
+				if p.Thought {
+					gotThinking += "(aggregate:" + p.Text + ")"
+					continue
+				}
+				gotAnswer += p.Text
 			}
 		}
 	}
@@ -777,12 +784,15 @@ func TestOpenRouterStreamingThinkingOnlyTurn(t *testing.T) {
 	if final == nil {
 		t.Fatal("expected a final TurnComplete response")
 	}
-	if len(final.Content.Parts) != 1 || final.Content.Parts[0].Text != "pondering deeply" {
+	// A thinking-only turn keeps its old fallback shape: the reasoning is the
+	// plain content, unflagged — flagging it Thought would make ADK read the
+	// turn as thought-only and re-call the model.
+	if len(final.Content.Parts) != 1 || final.Content.Parts[0].Text != "pondering deeply" || final.Content.Parts[0].Thought {
 		parts := make([]string, 0, len(final.Content.Parts))
 		for _, p := range final.Content.Parts {
-			parts = append(parts, p.Text)
+			parts = append(parts, fmt.Sprintf("{text:%q thought:%v}", p.Text, p.Thought))
 		}
-		t.Errorf("final parts = %v, want [pondering deeply]", parts)
+		t.Errorf("final parts = %v, want [pondering deeply] unflagged", parts)
 	}
 }
 
@@ -833,12 +843,16 @@ func TestOpenRouterStreamingThinkingWithToolCalls(t *testing.T) {
 	if final == nil {
 		t.Fatal("expected a final TurnComplete response")
 	}
-	if len(final.Content.Parts) != 1 {
-		t.Fatalf("expected exactly 1 part (the function call), got %d", len(final.Content.Parts))
+	// Two parts: the reasoning persists as a Thought part ahead of the call.
+	if len(final.Content.Parts) != 2 {
+		t.Fatalf("expected 2 parts (thought + function call), got %d", len(final.Content.Parts))
 	}
-	fc := final.Content.Parts[0].FunctionCall
+	thought, fc := final.Content.Parts[0], final.Content.Parts[1].FunctionCall
+	if !thought.Thought || thought.Text != "I should read the file" {
+		t.Errorf("expected the reasoning as a Thought part, got %+v", thought)
+	}
 	if fc == nil || fc.Name != "read_file" {
-		t.Errorf("expected a read_file function call part, got %+v", final.Content.Parts[0])
+		t.Errorf("expected a read_file function call part, got %+v", final.Content.Parts[1])
 	}
 	if fc != nil && fc.Args["path"] != "/tmp/x" {
 		t.Errorf("fc.Args[path] = %v, want /tmp/x", fc.Args["path"])
@@ -876,6 +890,7 @@ func TestOpenRouterStreamingInterleavedOrder(t *testing.T) {
 	}
 
 	var thinking strings.Builder
+	var aggregateThought strings.Builder
 	var answer strings.Builder
 	for resp, err := range m.GenerateContent(context.Background(), req, true) {
 		if err != nil {
@@ -888,6 +903,12 @@ func TestOpenRouterStreamingInterleavedOrder(t *testing.T) {
 			thinking.WriteString(resp.Content.Parts[0].Text)
 		} else if !resp.Partial {
 			for _, p := range resp.Content.Parts {
+				// The aggregate re-sends the reasoning Thought-flagged; the
+				// answer stream stays clean.
+				if p.Thought {
+					aggregateThought.WriteString(p.Text)
+					continue
+				}
 				answer.WriteString(p.Text)
 			}
 		}
@@ -895,6 +916,9 @@ func TestOpenRouterStreamingInterleavedOrder(t *testing.T) {
 
 	if thinking.String() != "think1think2" {
 		t.Errorf("thinking stream = %q, want %q", thinking.String(), "think1think2")
+	}
+	if aggregateThought.String() != "think1think2" {
+		t.Errorf("aggregate thought = %q, want the same reasoning persisted", aggregateThought.String())
 	}
 	if answer.String() != "say1say2" {
 		t.Errorf("answer aggregate = %q, want %q", answer.String(), "say1say2")

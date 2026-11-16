@@ -590,17 +590,18 @@ func TestCogProviderBRequestBodyGoldens(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type cogBPart struct {
-	Text   string         `json:"text,omitempty"`
-	FCName string         `json:"fc_name,omitempty"`
-	FCID   string         `json:"fc_id,omitempty"`
-	FCArgs map[string]any `json:"fc_args,omitempty"`
-	FCNil  bool           `json:"fc_nil_args,omitempty"`
+	Thought bool           `json:"thought,omitempty"`
+	Text    string         `json:"text,omitempty"`
+	FCName  string         `json:"fc_name,omitempty"`
+	FCID    string         `json:"fc_id,omitempty"`
+	FCArgs  map[string]any `json:"fc_args,omitempty"`
+	FCNil   bool           `json:"fc_nil_args,omitempty"`
 }
 
 func cogBParts(parts []*genai.Part) []cogBPart {
 	out := make([]cogBPart, 0, len(parts))
 	for _, p := range parts {
-		g := cogBPart{Text: p.Text}
+		g := cogBPart{Thought: p.Thought, Text: p.Text}
 		if p.FunctionCall != nil {
 			g.FCName = p.FunctionCall.Name
 			g.FCID = p.FunctionCall.ID
@@ -739,7 +740,9 @@ func TestCogProviderBBetaNonStreamingError(t *testing.T) {
 // standard streaming path: text deltas accumulate into the final text, a
 // thinking delta is yielded under the "thinking" role, a signature_delta is
 // ignored, an input_json_delta for an index with no tool_use header is dropped,
-// and the final usage folds the cache counters into the prompt count.
+// the final usage folds the cache counters into the prompt count, and the
+// reasoning the stream carried rides the final parts as a Thought part ahead
+// of the answer.
 func TestCogProviderBStandardStreamingGolden(t *testing.T) {
 	events := []struct {
 		name    string
@@ -832,7 +835,7 @@ func TestCogProviderBStandardStreamingGolden(t *testing.T) {
 		got = append(got, r)
 	}
 
-	const want = `[{"role":"model","partial":true,"turn":false,"parts":[{"text":"Hel"}]},{"role":"model","partial":true,"turn":false,"parts":[{"text":"lo"}]},{"role":"thinking","partial":true,"turn":false,"parts":[{"text":"hmm"}]},{"role":"model","partial":false,"turn":true,"finish":"STOP","parts":[{"text":"Hello"},{"fc_name":"bash","fc_id":"toolu_9","fc_args":{"cmd":"ls"}}],"usage":{"cachedContentTokenCount":9,"candidatesTokenCount":42,"promptTokenCount":17}}]`
+	const want = `[{"role":"model","partial":true,"turn":false,"parts":[{"text":"Hel"}]},{"role":"model","partial":true,"turn":false,"parts":[{"text":"lo"}]},{"role":"thinking","partial":true,"turn":false,"parts":[{"text":"hmm"}]},{"role":"model","partial":false,"turn":true,"finish":"STOP","parts":[{"thought":true,"text":"hmm"},{"text":"Hello"},{"fc_name":"bash","fc_id":"toolu_9","fc_args":{"cmd":"ls"}}],"usage":{"cachedContentTokenCount":9,"candidatesTokenCount":42,"promptTokenCount":17}}]`
 	if g := cogBMarshal(t, got); g != want {
 		t.Errorf("stream sequence:\n got %s\nwant %s", g, want)
 	}
