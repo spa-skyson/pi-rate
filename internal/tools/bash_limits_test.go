@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func TestSupervisor_PollReportsTheSameLimits(t *testing.T) {
 	if out.Handle == "" {
 		t.Fatal("expected a handle")
 	}
-	st, err := sup.readOutput(out.Handle, 0)
+	st, err := sup.readOutput(context.Background(), out.Handle, 0)
 	if err != nil {
 		t.Fatalf("readOutput: %v", err)
 	}

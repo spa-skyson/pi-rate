@@ -588,14 +588,20 @@ func (s *BashSupervisor) KillAll() {
 // A finished command is forgotten once its exit status has been reported, so a
 // handle is good for exactly one final read. Holding finished commands
 // indefinitely would turn the cap into a queue of corpses.
-func (s *BashSupervisor) readOutput(handle string, wait time.Duration) (BashStatus, error) {
+//
+// If ctx is canceled while waiting (a run abort, for example), readOutput
+// returns immediately with ctx.Err(); the background command itself keeps
+// running and stays reachable via the same handle for a later wait or kill.
+func (s *BashSupervisor) readOutput(ctx context.Context, handle string, wait time.Duration) (BashStatus, error) {
 	p, ok := s.lookup(handle)
 	if !ok {
 		return BashStatus{}, fmt.Errorf("unknown handle %q (running: %s)", handle, strings.Join(s.Handles(), ", "))
 	}
 
 	if wait > 0 {
-		p.awaitChange(wait)
+		if err := p.awaitChange(ctx, wait); err != nil {
+			return BashStatus{}, err
+		}
 	}
 
 	p.curMu.Lock()
@@ -640,7 +646,7 @@ func (s *BashSupervisor) readOutput(handle string, wait time.Duration) (BashStat
 // awaitChange blocks until the command produces output, exits, or the wait
 // elapses. Waiting on the streams' notify channels means a poll costs one
 // round trip instead of a spin.
-func (p *bashProc) awaitChange(wait time.Duration) {
+func (p *bashProc) awaitChange(ctx context.Context, wait time.Duration) error {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
@@ -648,7 +654,10 @@ func (p *bashProc) awaitChange(wait time.Duration) {
 	case <-p.stdout.wait():
 	case <-p.stderr.wait():
 	case <-timer.C:
+	case <-ctx.Done():
+		return ctx.Err()
 	}
+	return nil
 }
 
 // killHandle stops a background command and returns its final state.

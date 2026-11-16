@@ -148,7 +148,7 @@ func readUntil(t *testing.T, sup *BashSupervisor, handle, want string) string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		st, err := sup.readOutput(handle, 200*time.Millisecond)
+		st, err := sup.readOutput(context.Background(), handle, 200*time.Millisecond)
 		if err != nil {
 			t.Fatalf("readOutput: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestSupervisor_FinalReadReportsExitAndSpendsHandle(t *testing.T) {
 	)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		st, err := sup.readOutput(out.Handle, 500*time.Millisecond)
+		st, err := sup.readOutput(context.Background(), out.Handle, 500*time.Millisecond)
 		if err != nil {
 			t.Fatalf("readOutput: %v", err)
 		}
@@ -203,7 +203,7 @@ func TestSupervisor_FinalReadReportsExitAndSpendsHandle(t *testing.T) {
 	if !strings.Contains(collected.String(), "done") {
 		t.Errorf("output was lost across the read sequence: %q", collected.String())
 	}
-	if _, err := sup.readOutput(out.Handle, 0); err == nil {
+	if _, err := sup.readOutput(context.Background(), out.Handle, 0); err == nil {
 		t.Error("a spent handle should no longer resolve")
 	}
 }
@@ -258,7 +258,7 @@ func TestSupervisor_KillAllStopsEverything(t *testing.T) {
 		t.Errorf("Handles() = %v, want empty after KillAll", got)
 	}
 	for _, h := range handles {
-		if _, err := sup.readOutput(h, 0); err == nil {
+		if _, err := sup.readOutput(context.Background(), h, 0); err == nil {
 			t.Errorf("handle %s still resolves after KillAll", h)
 		}
 	}
@@ -278,11 +278,11 @@ func TestSupervisor_CapEvictsOldest(t *testing.T) {
 	if len(handles) != 2 {
 		t.Fatalf("Handles() = %v, want 2 entries", handles)
 	}
-	if _, err := sup.readOutput(first.Handle, 0); err == nil {
+	if _, err := sup.readOutput(context.Background(), first.Handle, 0); err == nil {
 		t.Error("oldest handle should have been evicted")
 	}
 	for _, h := range []string{second.Handle, third.Handle} {
-		if _, err := sup.readOutput(h, 0); err != nil {
+		if _, err := sup.readOutput(context.Background(), h, 0); err != nil {
 			t.Errorf("handle %s should have survived eviction: %v", h, err)
 		}
 	}
@@ -363,7 +363,7 @@ func TestSupervisor_UnknownHandleNamesTheLiveOnes(t *testing.T) {
 	sup := fastSupervisor(t)
 	live := run(t, sup, "sleep 30", 10*time.Second)
 
-	_, err := sup.readOutput("bg_nope", 0)
+	_, err := sup.readOutput(context.Background(), "bg_nope", 0)
 	if err == nil {
 		t.Fatal("expected an error for an unknown handle")
 	}
