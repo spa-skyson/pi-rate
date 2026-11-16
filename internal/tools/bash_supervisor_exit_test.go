@@ -128,7 +128,7 @@ func TestSupervisor_ConcurrentKillAndReadAreRaceFree(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = sup.readOutput(out.Handle, 20*time.Millisecond)
+		_, _ = sup.readOutput(context.Background(), out.Handle, 20*time.Millisecond)
 	}()
 	go func() {
 		defer wg.Done()

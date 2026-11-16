@@ -221,7 +221,7 @@ func TestBashControlTools_EmptyHandleNamesLiveOnes(t *testing.T) {
 	sup := fastSupervisor(t)
 	live := run(t, sup, "sleep 30", 10*time.Second)
 
-	if _, err := sup.readOutput("", 0); err == nil || !strings.Contains(err.Error(), live.Handle) {
+	if _, err := sup.readOutput(context.Background(), "", 0); err == nil || !strings.Contains(err.Error(), live.Handle) {
 		t.Errorf("readOutput with no handle should name live handles, got %v", err)
 	}
 	if _, err := sup.killHandle("nope"); err == nil || !strings.Contains(err.Error(), live.Handle) {
@@ -345,7 +345,7 @@ func TestSupervisor_LifetimeLimitKillsBackgroundCommand(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		st, err := sup.readOutput(out.Handle, 100*time.Millisecond)
+		st, err := sup.readOutput(context.Background(), out.Handle, 100*time.Millisecond)
 		if err != nil {
 			t.Fatalf("readOutput: %v", err)
 		}
@@ -373,10 +373,10 @@ func TestSupervisor_EvictionPrefersFinishedCommands(t *testing.T) {
 	// A third command forces an eviction.
 	third := run(t, sup, "sleep 30", 10*time.Second)
 
-	if _, err := sup.readOutput(live.Handle, 0); err != nil {
+	if _, err := sup.readOutput(context.Background(), live.Handle, 0); err != nil {
 		t.Errorf("the live command was evicted in preference to a finished one: %v", err)
 	}
-	if _, err := sup.readOutput(third.Handle, 0); err != nil {
+	if _, err := sup.readOutput(context.Background(), third.Handle, 0); err != nil {
 		t.Errorf("the new command should be registered: %v", err)
 	}
 }
@@ -724,7 +724,7 @@ func TestBashWait_EndsWhenTheChildExits(t *testing.T) {
 	}
 
 	start := time.Now()
-	st, err := sup.readOutput(out.Handle, 30*time.Second)
+	st, err := sup.readOutput(context.Background(), out.Handle, 30*time.Second)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("readOutput: %v", err)
@@ -768,7 +768,7 @@ func TestBashWait_LingeringGrandchildCostsTheExitStatus(t *testing.T) {
 	}
 
 	start := time.Now()
-	st, err := sup.readOutput(out.Handle, 30*time.Second)
+	st, err := sup.readOutput(context.Background(), out.Handle, 30*time.Second)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("readOutput: %v", err)
@@ -852,4 +852,49 @@ func TestNewBashTool_DescriptionFollowsTheResolvedShell(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Abort has to cut a long bash_wait short: the run is gone, so blocking on the
+// background command's output up to the full 600s timeout would leave the user
+// staring at a Stop button that does nothing. The background command itself
+// must survive the canceled wait — it stays reachable for bash_kill.
+func TestBashWait_ReturnsWhenRunContextIsCancelled(t *testing.T) {
+	sup := testSupervisor(t)
+	out, err := sup.Run(t.Context(), runRequest{
+		dir:     bashWorkDir(t),
+		command: "sleep 30",
+		timeout: 200 * time.Millisecond, // hands the command off to the background
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := sup.readOutput(ctx, out.Handle, 60*time.Second)
+		errCh <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	var waitErr error
+	select {
+	case waitErr = <-errCh:
+	case <-time.After(time.Second):
+		t.Fatal("readOutput did not return within 1s of cancellation")
+	}
+	if !errors.Is(waitErr, context.Canceled) {
+		t.Errorf("readOutput error = %v, want context.Canceled", waitErr)
+	}
+
+	// The command must still be alive under its handle.
+	st, err := sup.readOutput(context.Background(), out.Handle, 0)
+	if err != nil {
+		t.Fatalf("readOutput after cancellation: %v", err)
+	}
+	if !st.Running {
+		t.Errorf("status after canceled wait: Running = false, want the background command to survive")
+	}
+	sup.killHandle(out.Handle)
 }

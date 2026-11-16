@@ -272,11 +272,11 @@ func controlToolName(command string) string {
 func BashControlTools(sup *BashSupervisor) ([]tool.Tool, error) {
 	waitTool, err := newTool("bash_wait",
 		"Wait on a backgrounded command; returns output since the last wait. Blocks up to 60s (wait_sec, capped at 600), returning early on new output or exit. Prefer one generous wait_sec (300-600) over looping — each call is a round trip, and an empty result means nothing new, not a stuck command. When done: running=false plus the exit code; the handle is spent.",
-		func(_ agent.Context, input BashWaitInput) (BashStatus, error) {
+		func(ctx agent.Context, input BashWaitInput) (BashStatus, error) {
 			if input.Handle == "" {
 				return BashStatus{}, fmt.Errorf("handle is required (running: %v)", sup.Handles())
 			}
-			return sup.readOutput(input.Handle, bashWaitDur(input.WaitSec))
+			return sup.readOutput(ctx, input.Handle, bashWaitDur(input.WaitSec))
 		})
 	if err != nil {
 		return nil, err
