@@ -72,6 +72,13 @@ type Meta struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
+	// Pinned marks a session the user stuck to the top of the session list.
+	// It is a list-organization flag only — it never touches the destructive
+	// Archive operation — and the list's consumer decides how to sort on it.
+	// Older meta.json files predate the field and read as false, which is
+	// the desired default.
+	Pinned bool `json:"pinned,omitempty"`
+
 	// Host is a snapshot of the machine when the session began. It is here so a
 	// process that later dies with nothing but "signal: killed" can be checked
 	// against the resources it had, instead of guessed at.
@@ -511,10 +518,59 @@ func (s *FileService) evictCachedSessionsLocked() {
 	}
 }
 
+// syncCachedEventsLocked brings a cached session's event slice back in step
+// with the root events.jsonl. Two FileService instances can point at one
+// sessions directory (a second pirate process over the same tree: a resume
+// in another terminal, the serve command); appends through the other
+// instance land on the root file but never in this instance's cached slice,
+// which can only ever lag behind (every mutation through THIS instance
+// rewrites the root and updates the cache in the same critical section).
+// A cached slice whose length differs from the file is stale by
+// construction — serve it and SwitchBranch would save the stale slice over
+// the branch file, silently dropping the appended events (and Compact would
+// summarize a transcript that no longer matches the file). Length equality
+// is the freshness check: appends only grow the file.
+//
+// Caller must hold s.mu.
+func (s *FileService) syncCachedEventsLocked(sessionID string, sess *fileSession) {
+	if sess == nil {
+		return
+	}
+	sess.mu.Lock()
+	cached := len(sess.events)
+	sess.mu.Unlock()
+	if cached == 0 {
+		// The empty-cache rescue (stale-empty vs. genuinely empty session):
+		// an empty cache with a non-empty file drops the cache entry so the
+		// caller reloads the whole session (state replay included).
+		if info, err := os.Stat(filepath.Join(s.baseDir, sessionID, "events.jsonl")); err == nil && info.Size() > 0 {
+			delete(s.sessions, sessionID)
+		}
+		return
+	}
+	events, err := readEvents(filepath.Join(s.baseDir, sessionID))
+	if err != nil || len(events) == cached {
+		return
+	}
+	// Adopt the file's truth: replace the slice and keep the branch head
+	// in step (the other instance's appends moved it on disk; our cached
+	// copy never saw them).
+	sess.mu.Lock()
+	sess.events = events
+	if len(events) > 0 {
+		sess.updatedAt = events[len(events)-1].Timestamp
+	}
+	sess.mu.Unlock()
+}
+
 // loadSession loads a session from disk or cache.
 func (s *FileService) loadSession(sessionID, appName, userID string) (*fileSession, error) {
 	if sess, ok := s.sessions[sessionID]; ok {
-		return sess, nil
+		s.syncCachedEventsLocked(sessionID, sess)
+		if sess2, ok := s.sessions[sessionID]; ok {
+			return sess2, nil
+		}
+		// Stale-empty entry was dropped — fall through to the disk reload.
 	}
 
 	sessionDir := filepath.Join(s.baseDir, sessionID)
@@ -535,7 +591,11 @@ func (s *FileService) loadSession(sessionID, appName, userID string) (*fileSessi
 // must hold s.mu.
 func (s *FileService) loadSessionUnchecked(sessionID string) (*fileSession, error) {
 	if sess, ok := s.sessions[sessionID]; ok {
-		return sess, nil
+		s.syncCachedEventsLocked(sessionID, sess)
+		if sess2, ok := s.sessions[sessionID]; ok {
+			return sess2, nil
+		}
+		// Stale-empty entry was dropped — fall through to the disk reload.
 	}
 	sessionDir := filepath.Join(s.baseDir, sessionID)
 	meta, err := readMeta(sessionDir)
@@ -735,6 +795,38 @@ func (s *FileService) SetSessionWorkDir(sessionID, dir string) error {
 	return writeMeta(filepath.Join(s.baseDir, sessionID), &sess.meta)
 }
 
+// SetSessionPinned marks (or unmarks) a session as pinned and persists it to
+// meta.json. A pinned session can sort to the top of a session list; how the
+// list uses the flag is its consumer's decision.
+func (s *FileService) SetSessionPinned(sessionID string, pinned bool) error {
+	return s.updateSessionMetaFlag(sessionID, func(m *Meta) { m.Pinned = pinned })
+}
+
+// updateSessionMetaFlag applies fn to the cached (or lazily loaded) session's
+// meta and writes meta.json back. It is the shared body of the metadata flag
+// setters and mirrors SetSessionTitle's locking: the service lock is held for
+// the whole mutate-and-write. AppendEvent updates sess.meta and rewrites
+// meta.json under s.mu but without sess.mu, so dropping s.mu before the write
+// would let a concurrent append read the half-updated struct in its own
+// writeMeta (a data race) and land a stale snapshot over the flag afterwards.
+func (s *FileService) updateSessionMetaFlag(sessionID string, fn func(m *Meta)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		loaded, err := s.loadSessionUnchecked(sessionID)
+		if err != nil {
+			return err
+		}
+		sess = loaded
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	fn(&sess.meta)
+	return writeMeta(filepath.Join(s.baseDir, sessionID), &sess.meta)
+}
+
 // sanitizeSessionTitle trims surrounding whitespace, replaces ASCII control
 // characters (including CR, LF, TAB) with spaces, and drops ESC (0x1B) and
 // DEL (0x7F) entirely. This neutralizes OSC injection attempts — a stray
@@ -821,14 +913,20 @@ func (s *FileService) UpdatePlanContext(sessionID string, ctx *PlanContext) erro
 }
 
 // UpdateAgentContext records a session's place in an agent tree.
-// Pass nil to clear it.
+// Pass nil to clear it. Like the title/workDir setters, it lazy-loads the
+// session from disk when it is not cached, so metadata-only callers never
+// need to run the session first.
 func (s *FileService) UpdateAgentContext(sessionID string, ctx *AgentContext) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	sess, ok := s.sessions[sessionID]
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		loaded, err := s.loadSessionUnchecked(sessionID)
+		if err != nil {
+			return err
+		}
+		sess = loaded
 	}
 	sess.mu.Lock()
 	defer sess.mu.Unlock()

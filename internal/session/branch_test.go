@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -521,5 +522,181 @@ func TestActiveBranch(t *testing.T) {
 	active := svc.ActiveBranch(sessionID)
 	if active != "feature" {
 		t.Errorf("active branch = %q, want %q", active, "feature")
+	}
+}
+
+// TestLoadSessionRescuesStaleEmptyCache reproduces the two-instance staleness
+// bug in a single test. Two FileService instances hold one sessions
+// directory (a second pirate process over the same tree), so their session
+// caches are independent: svcA caches the session EMPTY at Create time, and
+// every event the other instance appends lands on disk and in its own cache
+// — never in svcA's. loadSession used to trust the cache unconditionally, so
+// svcA kept answering "session has 0 events" no matter how much had been
+// persisted — CreateBranchAt rejected every fork point, and SwitchBranch
+// would have saved an empty events file over the active branch.
+func TestLoadSessionRescuesStaleEmptyCache(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	svcA, err := NewFileService(dir)
+	if err != nil {
+		t.Fatalf("NewFileService(svcA) error: %v", err)
+	}
+	resp, err := svcA.Create(ctx, &session.CreateRequest{
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "stale-cache",
+	})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+	sessionID := resp.Session.ID()
+
+	// The second instance shares only the directory — its cache is
+	// separate — and appends the conversation while svcA's cached copy of
+	// the session stays empty forever.
+	svcB, err := NewFileService(dir)
+	if err != nil {
+		t.Fatalf("NewFileService(svcB) error: %v", err)
+	}
+	bResp, err := svcB.Get(ctx, &session.GetRequest{
+		AppName: "test-app", UserID: "test-user", SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("svcB.Get() error: %v", err)
+	}
+	addTestEvents(t, svcB, bResp.Session, 3)
+
+	// svcA's cache entry is stale-empty; this Get must rescue it from disk.
+	aResp, err := svcA.Get(ctx, &session.GetRequest{
+		AppName: "test-app", UserID: "test-user", SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("svcA.Get() error: %v", err)
+	}
+	if got := aResp.Session.Events().Len(); got != 3 {
+		t.Fatalf("svcA sees %d events after rescue, want 3 (disk state)", got)
+	}
+
+	// The rescued view keeps the disk transcript, so branching through it
+	// must see the disk events too. Before the
+	// fix this failed with "invalid fork point 2: session has 0 events
+	// (valid range 0..-1)".
+	if err := svcA.CreateBranchAt(sessionID, "test-app", "test-user", "from-event-2", 2); err != nil {
+		t.Fatalf("CreateBranchAt(2) through stale-cache instance: %v", err)
+	}
+
+	// The rescued view keeps the disk transcript: the forked branch carries
+	// all three events up to the fork point.
+	branchEvents, err := os.ReadFile(filepath.Join(dir, sessionID, "branches", "from-event-2", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("reading branch events: %v", err)
+	}
+	if got := strings.Count(string(branchEvents), "\n"); got != 3 {
+		t.Errorf("branch events file has %d lines, want 3", got)
+	}
+
+	// Negative case: a genuinely empty session (no events on disk either)
+	// must still be refused branching with the original validation error —
+	// the rescue is not a license to fork nothing.
+	empty, err := svcA.Create(ctx, &session.CreateRequest{
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "stale-empty-neg",
+	})
+	if err != nil {
+		t.Fatalf("Create(empty) error: %v", err)
+	}
+	err = svcA.CreateBranchAt(empty.Session.ID(), "test-app", "test-user", "nope", 0)
+	if err == nil {
+		t.Fatal("CreateBranchAt on empty session: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid fork point") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "invalid fork point")
+	}
+}
+
+// TestSetSessionPinnedConcurrentWithAppend pins the locking contract between
+// the metadata flag setters and AppendEvent: append updates sess.meta and
+// rewrites meta.json under s.mu but without sess.mu, so SetSessionPinned
+// must hold s.mu across its whole mutate-and-write. Run under -race. The
+// shapes it catches when the setter drops s.mu early: a data race on the
+// Pinned field (append's writeMeta marshals the whole Meta, reading Pinned
+// while the setter writes it) and a lost update (append's stale snapshot
+// lands after the setter's own write, erasing the flag from meta.json).
+func TestSetSessionPinnedConcurrentWithAppend(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	svc, err := NewFileService(dir)
+	if err != nil {
+		t.Fatalf("NewFileService() error: %v", err)
+	}
+	resp, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "pinned-race",
+	})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+	sessionID := resp.Session.ID()
+
+	bResp, err := svc.Get(ctx, &session.GetRequest{
+		AppName: "test-app", UserID: "test-user", SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("Get() error: %v", err)
+	}
+
+	lastAppend := time.Now()
+	const appends = 100
+	appenderDone := make(chan struct{})
+	go func() {
+		defer close(appenderDone)
+		for i := 0; i < appends; i++ {
+			lastAppend = time.Now()
+			event := &session.Event{
+				ID:        fmt.Sprintf("race-event-%d", i),
+				Timestamp: lastAppend,
+				Author:    "user",
+			}
+			event.Content = genai.NewContentFromText(fmt.Sprintf("race append %d", i), genai.RoleUser)
+			if err := svc.AppendEvent(ctx, bResp.Session, event); err != nil {
+				t.Errorf("AppendEvent(%d) error: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	const toggles = 200
+	for i := 0; i < toggles; i++ {
+		if err := svc.SetSessionPinned(sessionID, i%2 == 0); err != nil {
+			t.Fatalf("SetSessionPinned(%d) error: %v", i, err)
+		}
+	}
+
+	<-appenderDone
+
+	// Final state is deterministic: the pin loop's last write. meta.json
+	// must agree with it — pinned=true (not erased by a stale append
+	// snapshot) and an updatedAt from the appends (not a lost write).
+	if err := svc.SetSessionPinned(sessionID, true); err != nil {
+		t.Fatalf("final SetSessionPinned error: %v", err)
+	}
+	raw := readMetaRaw(t, filepath.Join(dir, sessionID, "meta.json"))
+	if raw["pinned"] != true {
+		t.Errorf("meta.json pinned = %v, want true", raw["pinned"])
+	}
+	updatedAt, ok := raw["updatedAt"].(string)
+	if !ok {
+		t.Fatalf("meta.json updatedAt missing or not a string: %v", raw["updatedAt"])
+	}
+	ts, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		t.Fatalf("parsing meta.json updatedAt %q: %v", updatedAt, err)
+	}
+	if ts.Before(lastAppend.Add(-time.Hour)) {
+		t.Errorf("meta.json updatedAt = %v, want a recent append's timestamp", ts)
 	}
 }

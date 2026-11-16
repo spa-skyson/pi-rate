@@ -74,6 +74,64 @@ func (s *FileService) CreateBranch(sessionID, appName, userID, branchName string
 	return saveBranches(sessionDir, bs)
 }
 
+// CreateBranchAt creates a new branch that forks from a specific event index
+// rather than the active branch's head. The new branch keeps the conversation
+// exactly up to (and including) that event, discarding everything after it on
+// the new path.
+//
+// The branch is created but NOT activated — the caller decides when to
+// switch, mirroring git checkout -b discipline on top of these primitives.
+func (s *FileService) CreateBranchAt(sessionID, appName, userID, branchName string, fromEventIdx int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, err := s.loadSession(sessionID, appName, userID)
+	if err != nil {
+		return fmt.Errorf("loading session: %w", err)
+	}
+
+	sessionDir := filepath.Join(s.baseDir, sessionID)
+	bs, err := loadBranches(sessionDir)
+	if err != nil {
+		return err
+	}
+
+	if _, exists := bs.Branches[branchName]; exists {
+		return fmt.Errorf("branch %q already exists", branchName)
+	}
+
+	// The fork point must name a real event: the store's event slice is
+	// 0-indexed, so len-1 is the last event (fork at head) and an empty
+	// session offers no valid fork points at all. Out-of-range is the
+	// caller's bug, not truncation material.
+	if len(sess.events) == 0 || fromEventIdx < 0 || fromEventIdx > len(sess.events)-1 {
+		return fmt.Errorf("invalid fork point %d: session has %d events (valid range 0..%d)", fromEventIdx, len(sess.events), len(sess.events)-1)
+	}
+
+	// Create branch directory and copy events up to and including the fork
+	// point into the branch events file.
+	branchDir := filepath.Join(sessionDir, "branches", branchName)
+	if err := os.MkdirAll(branchDir, 0o755); err != nil {
+		return fmt.Errorf("creating branch dir: %w", err)
+	}
+	branchEvents := sess.events[:fromEventIdx+1]
+	if err := rewriteEvents(branchDir, branchEvents); err != nil {
+		return fmt.Errorf("writing branch events: %w", err)
+	}
+
+	// Register the branch. Head equals the fork point: the branch contains
+	// exactly the events up to it. Parent stays the branch that was active
+	// at creation time, same as CreateBranch.
+	bs.Branches[branchName] = BranchInfo{
+		Name:      branchName,
+		Head:      fromEventIdx,
+		Parent:    new(bs.Active),
+		ForkPoint: fromEventIdx,
+	}
+
+	return saveBranches(sessionDir, bs)
+}
+
 // SwitchBranch switches the active branch for a session.
 // The session's in-memory events are replaced with the branch's events.
 func (s *FileService) SwitchBranch(sessionID, appName, userID, branchName string) error {
