@@ -824,6 +824,25 @@ func TestAppendActiveSkill(t *testing.T) {
 	if menuIdx < 0 || activeIdx < 0 || activeIdx <= menuIdx {
 		t.Errorf("Active Skill should follow Available Skills, got menu=%d active=%d", menuIdx, activeIdx)
 	}
+	// No BaseDir (e.g. a bundled skill): no files hint line.
+	if strings.Contains(got, "Files for this skill live in") {
+		t.Errorf("hint line must be absent without BaseDir, got %q", got)
+	}
+}
+
+func TestAppendActiveSkillBaseDirHint(t *testing.T) {
+	// A file-based skill with a BaseDir gets a hint line naming the
+	// directory its auxiliary files live in, so the agent can read
+	// references/, scripts/ and assets/ without guessing at paths.
+	base := "Base instruction."
+	skill := extension.Skill{Name: "diagram-design", BaseDir: "/data/pirate/skills/diagram-design"}
+	got := AppendActiveSkill(base, skill, "Body.")
+	if !strings.Contains(got, "# Active Skill: diagram-design") {
+		t.Errorf("missing active skill header, got %q", got)
+	}
+	if !strings.Contains(got, "/data/pirate/skills/diagram-design") {
+		t.Errorf("missing BaseDir path in hint, got %q", got)
+	}
 }
 
 func TestIntegrationToolExecution(t *testing.T) {

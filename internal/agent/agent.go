@@ -287,7 +287,7 @@ Use agents for any task that benefits from parallel or independent work:
 
 - **Research & exploration**: spawn skipper agents to search multiple code areas simultaneously — e.g. parallel skippers for "find all callers of FooService" and "find the config and initialization for FooService".
 - **Repository analysis**: for broad questions ("how does auth work?", "what changed recently?"), spawn 2-3 skipper agents targeting different aspects in parallel rather than searching sequentially yourself.
-- **Implementation**: use the cabin-boy agent for isolated coding in worktrees, or cabin-boy for edits in the main tree.
+- **Implementation**: use the cabin-boy agent for isolated coding in worktrees; edit the current tree yourself when changes must land in this session.
 - **Review**: use captain for diff review and for reviewing documents against their criteria.
 - **Planning**: use the first-mate agent to produce vertically-sliced implementation plans from codebase research.
 
@@ -1106,6 +1106,18 @@ func (a *Agent) Run(ctx context.Context, sessionID string, userMessage string) i
 
 // RunStreaming sends a user message with SSE streaming enabled.
 func (a *Agent) RunStreaming(ctx context.Context, sessionID string, userMessage string) iter.Seq2[*session.Event, error] {
+	// A previous run on this session may have died between persisting a tool
+	// call and its response — an OOM kill takes the run with it, and nothing
+	// else heals the orphan until the next in-process failure. ADK would then
+	// drop the call from every later context build with a "dropping function
+	// calls with no matching function response" warning, once per request,
+	// degrading the session. The sweep is idempotent: after one pass no
+	// orphans remain, and turns this process completes itself are already
+	// paired by the entry point's post-turn handling (the TUI loop's fail
+	// path), so this can only ever append the missing response, never a
+	// duplicate.
+	pisession.SynthesizeStoppedResponses(ctx, a.sessionService, AppName, DefaultUserID, sessionID,
+		"run interrupted before the tool call completed", a.config.Logger)
 	if err := a.runPreTurn(ctx, sessionID); err != nil {
 		return failedRun(err)
 	}
@@ -1681,8 +1693,16 @@ func sanitizeSkillName(name string) string {
 // The format is:
 //
 //	\n\n# Active Skill: <name>\n\n<body>\n
+//
+// A file-based skill with a known BaseDir gets an extra hint line naming the
+// directory its auxiliary files (references/, scripts/, assets/) live in, so
+// the agent can read them directly instead of guessing at paths.
 func AppendActiveSkill(prompt string, skill extension.Skill, body string) string {
-	return prompt + fmt.Sprintf("\n\n# Active Skill: %s\n\n%s\n", skill.Name, body)
+	out := prompt + fmt.Sprintf("\n\n# Active Skill: %s\n", skill.Name)
+	if skill.BaseDir != "" {
+		out += fmt.Sprintf("Files for this skill live in: %s (read-only; references/, scripts/, assets/ are relative to it)\n", skill.BaseDir)
+	}
+	return out + fmt.Sprintf("\n%s\n", body)
 }
 
 type contextFile struct {

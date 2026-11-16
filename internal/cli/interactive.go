@@ -1026,9 +1026,11 @@ func (in callbackInputs) build(rules permission.Rules, steps int) deferredCallba
 		afterCBs = append(afterCBs, in.memRecorder.afterTool)
 	}
 
-	// steps caps the tool-call iterations; 0 disables it. Must ride the
-	// composed chain below — a separate slice entry would never run (ADK
-	// stops at the first callback that returns a result).
+	// steps caps the tool-call iterations; 0 disables it. At the limit the
+	// model gets one finalizing move to write its final report; a further
+	// tool call aborts the run. Must ride the composed chain below — a
+	// separate slice entry would never run (ADK stops at the first callback
+	// that returns a result).
 	if steps > 0 {
 		afterCBs = append(afterCBs, agent.NewStepLimitCallback(steps))
 	}

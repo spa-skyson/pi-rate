@@ -270,8 +270,12 @@ func TestPalacePaths(t *testing.T) {
 	if dbPath != filepath.Join(home, ".pirate", "palace.db") {
 		t.Errorf("default palace db = %q", dbPath)
 	}
-	if !strings.Contains(modelPath, "MiniLM") {
-		t.Errorf("default model path = %q, want the bundled embedder", modelPath)
+	// The model fallback must equal palace.DefaultModelPath — the same
+	// source `memory model download` writes under its default destination
+	// and cli's palaceConfigFromCLI falls back to. A drift here leaves the
+	// downloaded model where no embedder looks.
+	if want := palace.DefaultModelPath(); modelPath != want {
+		t.Errorf("default model path = %q, want %q (palace.DefaultModelPath)", modelPath, want)
 	}
 
 	cfg := config.Config{Palace: &config.PalaceConfig{DBPath: "/tmp/p.db", ModelPath: "/tmp/m"}}

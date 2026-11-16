@@ -223,45 +223,50 @@ type runMergeResultMsg struct {
 	preservedWTPath string
 }
 
-// coordinatorContract is the Coordinator → Worker → Verifier execution contract
-// injected into every /run prompt. It is the reason a run survives long plans:
-// the coordinator's own context stays small because each slice is implemented in
-// a fresh worker context that is discarded once the slice lands.
+// coordinatorContract is the Coordinator → Verifier execution contract
+// injected into every /run prompt. The coordinator implements the plan's
+// slices itself, directly in the run worktree: /run merges only that
+// worktree, so a coding subagent's nested-worktree edits would be lost.
+// Delegation stays read-only — research and review — and a fresh Verifier
+// context judges the final diff against the Done Criteria.
 const coordinatorContract = `
 ## Your Role: Coordinator
 
-You are the **Coordinator**. You do NOT implement slices yourself — you delegate
-each one to a worker subagent, verify it, and record progress. Implementing
-slices inline is what makes runs die: the context grows with every file read and
-every diff until the provider drops the stream mid-slice.
+You are the **Coordinator**. You implement each slice yourself, directly in the
+run worktree, one slice at a time: read the slice's files, make the change, run
+its verify command. You do NOT delegate coding slices to subagents — a coding
+subagent works in a nested worktree whose edits the /run merge never picks up,
+so its changes are silently lost.
 
-### Delegating a slice
+### Implementing a slice
 
-Spawn ONE worker per slice with the ` + "`" + `subagent` + "`" + ` tool:
+Work through plan.md in order. For each unchecked slice: make the change it
+describes, then run that slice's verify command before moving on. Keep your own
+context small — read only the files a slice names plus what it touches, and
+compress what you learn instead of carrying full file contents forward, so the
+run survives all the slices without the provider dropping the stream.
 
-- ` + "`" + `{agent: "cabin-boy", task: "<self-contained brief>"}` + "`" + ` — the default.
-- ` + "`" + `{agent: "cabin-boy", task: "..."}` + "`" + ` — a single-file mechanical change.
-- ` + "`" + `{tasks: [{agent: "cabin-boy", task: "..."}, ...]}` + "`" + ` — several slices at once, ONLY
-  when the plan marks them parallel-safe, they touch disjoint files, AND the
-  ` + "`" + `subagent` + "`" + ` tool description says this process runs more than one subagent at a
-  time. Batching past that number does not overlap anything: the extra tasks
-  queue inside the same tool call and it takes proportionally longer, which is
-  how a "parallel" batch turns into a timeout. When in doubt, dispatch one
-  slice per call — sequential slices are the normal case.
+Subagents stay read-only:
+- ` + "`" + `{agent: "skipper", task: "<question>"}` + "`" + ` — codebase research before a slice
+  (how the code works today, where a type lives), so file contents never enter
+  your own context.
+- ` + "`" + `{agent: "captain", task: "<question>"}` + "`" + ` — a second opinion on a design or
+  conflict question mid-run.
 
-**Never spawn ` + "`" + `cabin-boy` + "`" + ` for a slice.** It is a [worktree] agent: its edits go to
-a nested worktree that is never merged back, so the slice silently produces
-nothing.
+NEVER delegate coding to a subagent, and never spawn a coding agent such as
+` + "`" + `cabin-boy` + "`" + ` from a run: it is a [worktree] agent, and a [worktree] agent's
+edits land in a nested worktree that is never merged back — the slice silently
+produces nothing.
 
-Each worker brief must stand alone — the worker cannot see this conversation.
-State the exact files, the change, the surrounding conventions, and the verify
-command. Do NOT paste the whole plan into a worker brief; give it only its slice.
+Each slice's description in plan.md must stand on its own — state the exact
+files, the change, and the verify command there, since that is the brief you
+execute against.
 
 ### After each slice
 
-1. Run that slice's verify command yourself.
-2. If it fails, send a fix brief to a new worker (up to 3 attempts per slice),
-   including the exact error output.
+1. Run that slice's verify command (again, if the slice's own run left doubts).
+2. If it fails, fix the slice yourself (up to 3 attempts per slice), then run
+   the verify command again.
 3. Tick the checkbox in specs/%[1]s/plan.md: ` + "`" + `- [ ] Step N:` + "`" + ` → ` + "`" + `- [x] Step N:` + "`" + `.
 
 Tick a box only after its verify command has actually passed. A checked box that
@@ -273,7 +278,7 @@ Spawn the Verifier and act on its verdict:
 
 ` + "`" + `{agent: "captain", task: "Check the working-tree diff against these Done Criteria: <paste the Done Criteria from the briefing above, or the Acceptance Criteria if absent>. For each criterion answer MET or NOT MET with the file and line that proves it. Flag any stub, TODO, or panic(\"not implemented\") left in the changed files. End your reply with exactly one line: VERDICT: PASS or VERDICT: FAIL."}` + "`" + `
 
-- **VERDICT: FAIL** — dispatch fix workers for the NOT MET items, then verify again.
+- **VERDICT: FAIL** — fix the NOT MET items yourself, then verify again.
   Repeat up to 10 cycles.
 - **VERDICT: PASS** — report the changed files and stop. Do not commit or merge;
   /run handles gates and the merge.
@@ -422,8 +427,8 @@ func (m *model) handleRunCommand(args []string) (tea.Model, tea.Cmd) {
 	}
 
 	// Preflight: a spec that cannot succeed should fail here, in a second,
-	// rather than as a worker with an unrunnable verify command forty minutes
-	// in. --force keeps the decision the user's.
+	// rather than as the run agent with an unrunnable verify command forty
+	// minutes in. --force keeps the decision the user's.
 	if !m.preflightAllows(specName, force) {
 		return m, nil
 	}
@@ -435,9 +440,9 @@ func (m *model) handleRunCommand(args []string) (tea.Model, tea.Cmd) {
 	checklist := parsePlanChecklist(m.cfg.WorkDir, specName)
 
 	// Warn before spawning: a spec file past the read window is served to
-	// workers one page at a time, so a worker sent to read its slice can act
-	// on a partial plan. The SOP tells /plan to avoid this; this catches the
-	// plans that arrive oversized anyway.
+	// the coordinator one page at a time, so the coordinator sent to read its
+	// slice can act on a partial plan. The SOP tells /plan to avoid this;
+	// this catches the plans that arrive oversized anyway.
 	if oversized := oversizedSpecFiles(m.cfg.WorkDir, specName); len(oversized) > 0 {
 		m.chatModel.Messages = append(m.chatModel.Messages, message{
 			role:    "assistant",
@@ -507,8 +512,8 @@ func formatRunGateInfo(gates []Gate) string {
 	return strings.Join(names, ", ")
 }
 
-// startRunAgent spawns the single-agent /run worker and installs the run state
-// the event loop drives from there.
+// startRunAgent spawns the single-agent /run coordinator and installs the run
+// state the event loop drives from there.
 func (m *model) startRunAgent(
 	specName, promptMD string, gates []Gate, checklist []ChecklistStep, gateInfo string,
 ) (tea.Model, tea.Cmd) {
@@ -684,7 +689,7 @@ func buildParallelPrompt(specName, promptMD string, checklist []ChecklistStep, f
 	fmt.Fprintf(&b, coordinatorContract, specName)
 	b.WriteString("\n## Execution Instructions (Parallel Mode)\n")
 	b.WriteString("You are ONE OF TWO coordinators working on this spec in parallel.\n")
-	b.WriteString("You are responsible for delegating ONLY these slices:\n\n")
+	b.WriteString("You are responsible for implementing ONLY these slices:\n\n")
 	for i := from; i < to; i++ {
 		fmt.Fprintf(&b, "- Slice %d: %s\n", i+1, checklist[i].Title)
 	}
@@ -1147,7 +1152,7 @@ func buildResumePrompt(specName, promptMD, reason, extraContext string) string {
 	b.WriteString(specName)
 	b.WriteString("/plan.md first to see which slices are already ticked\n")
 	b.WriteString("- Re-verify one completed slice before trusting the checklist; if a ticked slice does not actually work, untick it\n")
-	b.WriteString("- Delegate the remaining slices to workers as described above\n")
+	b.WriteString("- Implement the remaining slices yourself as described above — one slice at a time, each verified before the next\n")
 	return b.String()
 }
 
@@ -1902,10 +1907,11 @@ func parseGates(promptMD string) []Gate {
 
 // readWindowLines mirrors the read tool's default line window
 // (defaultReadLimit in internal/tools/read.go). A spec file longer than this
-// is returned a page at a time, so a worker reading it may see only part.
+// is returned a page at a time, so the coordinator reading it may see only part.
 const readWindowLines = 2000
 
-// windowedSpecFiles are the spec documents a worker reads for slice detail.
+// windowedSpecFiles are the spec documents the coordinator reads for slice
+// detail.
 // PROMPT.md is excluded: /run loads it with os.ReadFile and embeds it whole in
 // the coordinator prompt, so the read window never applies to it.
 var windowedSpecFiles = []string{"plan.md", "design.md"}
@@ -1950,11 +1956,11 @@ func countLines(content []byte) int {
 // rather than only reporting the number.
 func formatOversizedSpecWarning(files []oversizedSpecFile) string {
 	var b strings.Builder
-	b.WriteString("**Spec exceeds the read window** — workers will page through it:\n\n")
+	b.WriteString("**Spec exceeds the read window** — you will page through it:\n\n")
 	for _, f := range files {
 		fmt.Fprintf(&b, "- `%s`: %d lines (window is %d)\n", f.Name, f.Lines, readWindowLines)
 	}
-	b.WriteString("\nA worker sent to read its slice may act on a partial view. ")
+	b.WriteString("\nYou may act on a partial view when executing a slice. ")
 	b.WriteString("Prefer splitting the feature into sequential specs over shrinking the prose — ")
 	b.WriteString("a plan too long to read in one call is also too long for one Coordinator.\n")
 	b.WriteString("Running anyway.\n")

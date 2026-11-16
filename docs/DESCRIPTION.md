@@ -309,7 +309,7 @@ Layer L3: Search
 
 **Components:**
 - **SQLite Store:** `palace.db` with FTS5 virtual tables
-- **Embedder:** `KnightsAnalytics_all-MiniLM-L6-v2` (local model)
+- **Embedder:** `sentence-transformers_all-MiniLM-L6-v2` (local model)
 - **Knowledge Graph:** Triples (subject, predicate, object) with temporal edges
 - **Miners:** Convo-miner (conversation patterns), Project-miner (codebase patterns)
 - **Observation Bridge:** Auto-file observations as palace drawers

@@ -265,7 +265,8 @@ Set a default in ~/.pirate/config.json so --model is only needed to deviate;
 		`MCP servers to start in print/json modes: "all", or a comma-separated server name list; default starts none in those one-shot modes. PI_MCP does the same when the flag is unset, and propagates to subagents. Interactive and server (rpc/socket) modes start every server not named out by an active --tools list`)
 	cmd.Flags().Float64Var(&flagTemperature, "temperature", 0, "LLM sampling temperature (0 keeps the provider default)")
 	cmd.Flags().StringVar(&flagThinking, "thinking", "", "Reasoning effort: none, low, medium, high, or max (overrides config thinking level)")
-	cmd.Flags().IntVar(&flagSteps, "steps", 0, "Max tool-call iterations per run (0 = no limit)")
+	cmd.Flags().IntVar(&flagSteps, "steps", 0,
+		"Max tool-call iterations per run; at the limit the agent gets one finalizing move to write its final report, a further tool call aborts the run (0 = no limit)")
 	// Persistent, not local: `pirate memory mine . --pprof true` and every other
 	// subcommand must accept these too. As local flags they were rejected with
 	// "unknown flag: --pprof" the moment a subcommand was used.
@@ -1016,8 +1017,10 @@ func runNonInteractive(
 	}
 
 	// --steps caps the tool-call iterations (the subagent budget a parent
-	// passes down). Appended before the fold so it rides the composed chain:
-	// handed to ADK as a separate slice entry it would never run.
+	// passes down): at the limit the model gets one finalizing move to write
+	// its final report, a further tool call aborts the run. Appended before
+	// the fold so it rides the composed chain: handed to ADK as a separate
+	// slice entry it would never run.
 	if flagSteps > 0 {
 		afterCBs = append(afterCBs, agent.NewStepLimitCallback(flagSteps))
 	}
@@ -2872,7 +2875,11 @@ func palaceConfigFromCLI(cfg *config.Config) palace.PalaceConfig {
 		palaceCfg.DBPath = filepath.Join(config.PirateHome(), "palace.db")
 	}
 	if palaceCfg.ModelPath == "" {
-		palaceCfg.ModelPath = filepath.Join(config.PirateHome(), "models", "KnightsAnalytics_all-MiniLM-L6-v2")
+		// The embedder's default load path must equal the path `memory model
+		// download` writes (defaultPalaceModelPath): split literals here and
+		// in memory.go meant the download wrote a cache the embedder never
+		// looked at.
+		palaceCfg.ModelPath = defaultPalaceModelPath()
 	}
 	return palaceCfg
 }

@@ -1,9 +1,33 @@
 package palace
 
+import (
+	"path/filepath"
+
+	"github.com/spa-skyson/pi-rate/internal/config"
+)
+
 const (
 	defaultDeduplicationThreshold = float32(0.9)
 	defaultDBPath                 = "palace.db"
+
+	// DefaultModelDirName is the on-disk directory name of the in-process
+	// embedding model: the subdir `memory model download` creates under its
+	// destination (hugot names it after the sentence-transformers/all-MiniLM-L6-v2
+	// repo id), and the leaf DefaultModelPath appends. Every literal that
+	// names this directory must derive from this constant — split copies of
+	// the name made `memory model download` write a cache the embedder never
+	// looked at.
+	DefaultModelDirName = "sentence-transformers_all-MiniLM-L6-v2"
 )
+
+// DefaultModelPath is the single source of truth for where the embedding
+// model lives by default: the path `memory model download` writes to (under
+// its default destination) and every embedder opens — cli's
+// palaceConfigFromCLI and piagent's palacePaths both fall back to it. If
+// these paths drift apart, the download lands where no embedder looks.
+func DefaultModelPath() string {
+	return filepath.Join(config.PirateHome(), "models", DefaultModelDirName)
+}
 
 // PalaceConfig holds configuration for the Palace system.
 type PalaceConfig struct {
